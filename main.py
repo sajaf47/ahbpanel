@@ -1,5 +1,5 @@
 # ============================================================
-# ahbpanel 14.1.0
+# ahbpanel 14.2.0
 # Railway Ready
 # Created By Ahb
 # ============================================================
@@ -38,7 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # ============================================================
 
 APP_NAME = "ahbpanel"
-APP_VERSION = "14.1.0"
+APP_VERSION = "14.2.0"
 
 SUPPORT_USERNAME = "@ahb_panel"
 SUPPORT_URL = "https://t.me/ahbpanel"
@@ -2181,7 +2181,7 @@ AHB Panel
 </div>
 
 <div class="version">
-14.1.0
+14.2.0
 </div>
 </div>
 
@@ -2229,7 +2229,7 @@ class="btn secondary"
 <div class="footer">
 
 <span>
-AHB Panel · 14.1.0
+AHB Panel · 14.2.0
 </span>
 
 <a
@@ -3907,11 +3907,12 @@ async def info_page(
     uid: str,
     request: Request,
 ):
+    """Modern AHB subscription/info page. All values are read from the real link record."""
     async with LINKS_LOCK:
         link = LINKS.get(uid)
         if not link:
             return HTMLResponse(
-                "<html lang=\"fa\" dir=\"rtl\"><body style=\"margin:0;background:#f7f9ff;color:#101b55;font-family:sans-serif;padding:40px\"><h2>کانفیگ پیدا نشد</h2></body></html>",
+                "<html lang=\"fa\" dir=\"rtl\"><body style=\"margin:0;background:#071021;color:#fff;font-family:sans-serif;padding:40px;text-align:center\"><h2>کانفیگ پیدا نشد</h2></body></html>",
                 status_code=404,
             )
         snapshot = dict(link)
@@ -3924,12 +3925,10 @@ async def info_page(
 
     if limit > 0:
         usage_percent = max(0, min(100, round((used / limit) * 100, 1)))
-        usage_value = f"{fmt_bytes(used)} / {fmt_bytes(limit)}"
-        remaining_value = fmt_bytes(max(0, limit - used))
+        remaining = max(0, limit - used)
     else:
         usage_percent = 0
-        usage_value = f"{fmt_bytes(used)} / نامحدود"
-        remaining_value = "نامحدود"
+        remaining = 0
 
     expires_at = snapshot.get("expires_at")
     if expires_at:
@@ -3944,8 +3943,7 @@ async def info_page(
                 hours, rem = divmod(rem, 3600)
                 minutes, _ = divmod(rem, 60)
                 expiry_remaining = (
-                    f"{days} روز و {hours} ساعت"
-                    if days
+                    f"{days} روز و {hours} ساعت" if days
                     else (f"{hours} ساعت و {minutes} دقیقه" if hours else f"{minutes} دقیقه")
                 )
         except Exception:
@@ -3956,291 +3954,111 @@ async def info_page(
         expiry_display = "نامحدود"
 
     status_text = "فعال" if is_link_allowed(snapshot) else "غیرفعال"
-    status_color = "#10b981" if status_text == "فعال" else "#ef4444"
-    label_escaped = escape_html(snapshot.get("label", "AHBPanel"))
-    uid_escaped = escape_html(uid)
-    app_version_str = escape_html(str(APP_VERSION))
-    used_bytes_str = escape_html(fmt_bytes(used))
-    limit_bytes_str = escape_html(fmt_bytes(limit)) if limit > 0 else "∞"
-    remaining_value_escaped = escape_html(remaining_value)
-    expiry_remaining_escaped = escape_html(expiry_remaining)
-    expiry_display_escaped = escape_html(expiry_display)
+    status_color = "#22c55e" if status_text == "فعال" else "#ef4444"
+    label = escape_html(snapshot.get("label", "AHBPanel"))
+    uid_e = escape_html(uid)
+    app_version = escape_html(str(APP_VERSION))
+    used_s = escape_html(fmt_bytes(used))
+    limit_s = escape_html(fmt_bytes(limit)) if limit > 0 else "∞"
+    remain_s = escape_html(fmt_bytes(remaining)) if limit > 0 else "نامحدود"
+    expiry_rem_s = escape_html(expiry_remaining)
+    expiry_display_s = escape_html(expiry_display)
     ip_limit = "نامحدود" if not snapshot.get("ip_limit", 0) else str(snapshot.get("ip_limit"))
-    connection_limit = "نامحدود" if not snapshot.get("connection_limit", 0) else str(snapshot.get("connection_limit"))
+    conn_limit = "نامحدود" if not snapshot.get("connection_limit", 0) else str(snapshot.get("connection_limit"))
     speed_limit = "نامحدود" if not snapshot.get("speed_limit_bytes", 0) else fmt_bytes(snapshot.get("speed_limit_bytes", 0)) + "/s"
-    ip_limit_escaped = escape_html(ip_limit)
-    connection_limit_escaped = escape_html(connection_limit)
-    speed_limit_escaped = escape_html(speed_limit)
-    protocol_escaped = escape_html(snapshot.get("protocol", "vless-ws"))
-    fingerprint_escaped = escape_html(snapshot.get("fingerprint", "chrome"))
-    vless_url_escaped = escape_html(vless_url)
-    sub_url_escaped = escape_html(sub_url)
-    dash_calc_offset = f"{339.29 - (339.29 * min(usage_percent, 100) / 100):.1f}"
+    protocol = escape_html(snapshot.get("protocol", "vless-ws"))
+    fingerprint = escape_html(snapshot.get("fingerprint", "chrome"))
+    vless_url_e = escape_html(vless_url)
+    sub_url_e = escape_html(sub_url)
+    dash_offset = f"{339.292 - (339.292 * min(usage_percent, 100) / 100):.2f}"
 
-    # This page is intentionally kept inside /info/{uid}; /sub/{uid} remains the raw subscription endpoint.
     info_html = f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>{label_escaped} | AHBPanel</title>
+<title>{label} | AHB Subscription</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <style>
-:root{{
-  --bg:#f7f9ff;
-  --card:rgba(255,255,255,.88);
-  --card2:#eef4ff;
-  --text:#101b55;
-  --muted:#50639e;
-  --blue:#2563eb;
-  --blue2:#60a5fa;
-  --red:#ef4444;
-  --green:#10b981;
-  --border:rgba(37,99,235,.20);
-  --shadow:0 16px 45px rgba(40,64,105,.10);
-}}
-*{{box-sizing:border-box}}
-html,body{{margin:0;min-height:100%;font-family:'Vazirmatn',Tahoma,sans-serif;color:var(--text)}}
-body{{
-  min-height:100vh;padding:18px 14px 30px;overflow-x:hidden;
-  background:
-    radial-gradient(ellipse 70% 30% at 0% 5%,rgba(96,165,250,.22),transparent 65%),
-    radial-gradient(ellipse 60% 30% at 100% 5%,rgba(239,68,68,.14),transparent 65%),
-    linear-gradient(180deg,#fbfcff 0%,#f5f8ff 100%);
-  transition:.25s ease;
-}}
-body:before,body:after{{content:"";position:fixed;z-index:-1;width:230px;height:230px;bottom:-90px;border-radius:50%;filter:blur(2px);opacity:.35;pointer-events:none}}
-body:before{{right:-110px;background:radial-gradient(circle,rgba(239,68,68,.42),transparent 67%)}}
-body:after{{left:-110px;background:radial-gradient(circle,rgba(37,99,235,.40),transparent 67%)}}
-body.dark{{
-  --bg:#071021;--card:rgba(10,24,48,.88);--card2:#0e2447;--text:#f5f8ff;--muted:#9db0d8;
-  --border:rgba(96,165,250,.24);--shadow:0 18px 55px rgba(0,0,0,.30);
-  background:radial-gradient(ellipse 70% 30% at 0% 5%,rgba(37,99,235,.22),transparent 65%),radial-gradient(ellipse 60% 30% at 100% 5%,rgba(239,68,68,.14),transparent 65%),#071021;
-}}
-.page{{width:100%;max-width:930px;margin:0 auto}}
-.theme-box,.hero,.traffic,.details{{background:var(--card);border:1.5px solid var(--border);box-shadow:var(--shadow);backdrop-filter:blur(16px)}}
-.theme-box{{min-height:105px;border-radius:30px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;gap:18px;position:relative;overflow:hidden}}
-.theme-box:after,.hero:after{{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;background:linear-gradient(90deg,rgba(37,99,235,.06),transparent 45%,rgba(239,68,68,.05))}}
-.theme-left{{display:flex;align-items:center;gap:18px;position:relative;z-index:1}}
-.theme-icon{{font-size:39px;line-height:1}}
-.theme-title{{font-size:25px;font-weight:900}}
-.theme-desc{{margin-top:6px;color:var(--muted);font-size:14px;line-height:1.9}}
-.switch{{position:relative;width:84px;height:44px;display:inline-block;flex:none;z-index:2}}
-.switch input{{opacity:0;width:0;height:0}}
-.slider{{position:absolute;inset:0;background:#d8dfef;border-radius:999px;cursor:pointer;transition:.2s;border:1px solid rgba(16,27,85,.06)}}
-.slider:before{{content:"✓";position:absolute;width:34px;height:34px;left:4px;top:4px;border-radius:50%;background:#fff;color:#c9d2e5;display:grid;place-items:center;font-weight:900;font-size:17px;transition:.2s;box-shadow:0 3px 8px rgba(20,40,80,.10)}}
-.switch input:checked+.slider{{background:linear-gradient(90deg,var(--blue),var(--red))}}
-.switch input:checked+.slider:before{{transform:translateX(40px);color:var(--green)}}
-.theme-moon{{font-size:29px;opacity:.85}}
-.hero{{margin-top:22px;border-radius:30px;padding:22px;position:relative;overflow:hidden}}
-.hero-top{{display:flex;align-items:flex-start;justify-content:space-between;gap:15px;position:relative;z-index:1}}
-.hero-title{{font-size:31px;font-weight:900;letter-spacing:-.5px}}
-.hero-meta{{margin-top:7px;color:var(--muted);font-size:16px;direction:ltr;text-align:right;line-height:1.8}}
-.shield{{width:58px;height:58px;display:grid;place-items:center;border-radius:18px;border:1px solid rgba(37,99,235,.22);color:var(--blue);background:rgba(37,99,235,.07);font-size:32px}}
-.hero-bottom{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:20px;position:relative;z-index:1}}
-.pill{{min-height:52px;border-radius:28px;padding:0 25px;display:inline-flex;align-items:center;justify-content:center;gap:9px;font-size:18px;font-weight:900}}
-.share{{color:#fff;text-decoration:none;background:linear-gradient(100deg,#1677ee 0%,#6a5be8 45%,#ff4d55 100%);box-shadow:0 8px 22px rgba(37,99,235,.18)}}
-.status{{background:#11b99b;color:#fff;min-width:155px}}
-.qr{{background:linear-gradient(180deg,#fff1f3,#ffe5e9);border:1px solid rgba(239,68,68,.22);color:#e72f3d;cursor:pointer}}
-.hero-actions{{display:flex;gap:12px;align-items:center;flex-wrap:wrap}}
-.traffic{{margin-top:22px;border-radius:30px;padding:23px;position:relative;overflow:hidden}}
-.section-head{{display:flex;align-items:center;justify-content:flex-start;gap:10px}}
-.section-head h2{{margin:0;font-size:25px;font-weight:900}}
-.section-sub{{font-size:13px;letter-spacing:1.5px;color:var(--muted);font-weight:700;margin-top:2px}}
-.chart-icon{{font-size:31px;color:var(--red)}}
-.usage-main{{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px 0 4px}}
-.ring-wrap{{position:relative;width:245px;height:245px}}
-.ring{{width:245px;height:245px;transform:rotate(-90deg)}}
-.ring-track{{stroke:#a9c8ff;opacity:.9}}
-.ring-fill{{stroke:#22c55e;filter:drop-shadow(0 0 5px rgba(34,197,94,.20))}}
-.ring-center{{position:absolute;inset:0;display:grid;place-items:center;text-align:center}}
-.ring-number{{font-size:42px;font-weight:900;line-height:1}}
-.ring-label{{margin-top:8px;font-size:15px;color:var(--muted);font-weight:700}}
-.usage-total{{margin-top:3px;font-size:24px;font-weight:900;direction:ltr;color:var(--muted)}}
-.trend{{margin-top:24px;border-radius:22px;border:1px solid rgba(37,99,235,.18);background:linear-gradient(180deg,rgba(239,244,255,.92),rgba(229,237,255,.76));padding:17px 19px}}
-body.dark .trend{{background:rgba(4,17,38,.58)}}
-.trend-title{{font-size:17px;font-weight:800;text-align:right;color:var(--text)}}
-.progress{{height:22px;border-radius:99px;background:#dce8ff;overflow:hidden;margin-top:25px;box-shadow:inset 0 1px 5px rgba(20,50,100,.10)}}
-.progress-fill{{height:100%;width:{usage_percent}%;min-width:{'0' if usage_percent==0 else '8'}px;border-radius:inherit;background:linear-gradient(90deg,#2196ff,#2458ef)}}
-.bottom-stats{{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-top:25px;font-size:18px;color:var(--muted);font-weight:700}}
-.bottom-stat b{{color:var(--text);font-size:21px}}
-.details{{margin-top:22px;border-radius:26px;padding:20px}}
-.detail-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:16px}}
-.detail{{border:1px solid rgba(37,99,235,.12);background:var(--card2);border-radius:17px;padding:14px}}
-.detail-label{{font-size:12px;color:var(--muted)}}
-.detail-value{{margin-top:5px;font-size:14px;font-weight:900;direction:ltr;text-align:right;word-break:break-word}}
-.link-card{{margin-top:22px;border-radius:26px;padding:20px;background:var(--card);border:1.5px solid var(--border);box-shadow:var(--shadow)}}
-.link-head{{display:flex;align-items:center;justify-content:space-between;gap:10px}}
-.link-title{{font-size:20px;font-weight:900}}
-.copy-btn{{border:0;color:#fff;background:linear-gradient(100deg,#176be7,#347ff3);padding:12px 19px;border-radius:13px;font-family:inherit;font-weight:900;cursor:pointer}}
-.url-box{{margin-top:13px;border:1px solid rgba(37,99,235,.16);background:var(--card2);border-radius:16px;padding:15px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;font-size:12px;direction:ltr;text-align:left;word-break:break-all;line-height:1.8}}
-.link-actions{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}}
-.action-btn{{min-height:55px;border-radius:17px;border:1px solid rgba(37,99,235,.16);background:var(--card2);color:var(--text);font:800 16px 'Vazirmatn';cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:10px}}
-.action-btn.download{{background:linear-gradient(100deg,#1677ee,#367cf0);color:#fff;border-color:transparent}}
-.footer{{text-align:center;color:var(--muted);font-size:12px;padding:22px 0 4px}}
-.modal{{position:fixed;inset:0;z-index:50;background:rgba(5,12,30,.72);display:none;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(8px)}}
-.modal.show{{display:flex}}
-.modal-card{{width:min(420px,100%);background:#fff;border-radius:25px;padding:22px;text-align:center;box-shadow:0 25px 80px rgba(0,0,0,.3)}}
-.modal-title{{font-weight:900;color:#101b55;font-size:18px}}
-.qrbox{{margin:16px auto;background:#fff;padding:12px;border-radius:18px;display:inline-block}}
-.close{{border:0;background:#eef2fa;color:#101b55;border-radius:12px;padding:10px 16px;font-family:inherit;font-weight:800;cursor:pointer}}
-@media(max-width:650px){{
-  body{{padding:12px 9px 24px}}
-  .theme-box{{min-height:94px;border-radius:24px;padding:15px 16px}}
-  .theme-left{{gap:11px}} .theme-icon{{font-size:31px}} .theme-title{{font-size:21px}} .theme-desc{{font-size:11px}}
-  .switch{{width:70px;height:38px}} .slider:before{{width:30px;height:30px;font-size:14px}} .switch input:checked+.slider:before{{transform:translateX(32px)}} .theme-moon{{font-size:22px}}
-  .hero,.traffic,.details,.link-card{{border-radius:24px;padding:17px}}
-  .hero-title{{font-size:26px}} .hero-meta{{font-size:12px}} .shield{{width:48px;height:48px;font-size:26px;border-radius:15px}}
-  .hero-bottom{{flex-direction:column;align-items:stretch}} .hero-actions{{justify-content:space-between}}
-  .pill{{min-height:48px;font-size:15px;padding:0 18px}}
-  .status{{min-width:135px}} .section-head h2{{font-size:22px}}
-  .ring-wrap,.ring{{width:205px;height:205px}} .ring-number{{font-size:35px}}
-  .usage-total{{font-size:19px}} .trend{{padding:14px}} .progress{{height:19px}}
-  .bottom-stats{{font-size:14px}} .bottom-stat b{{font-size:17px}}
-  .detail-grid{{grid-template-columns:1fr}} .link-head{{align-items:flex-start}} .link-title{{font-size:17px}}
-  .link-actions{{grid-template-columns:1fr 1fr}} .action-btn{{font-size:14px}}
-}}
+:root{{--bg:#050b1d;--bg2:#071631;--card:rgba(9,25,53,.88);--card2:#0d2245;--line:rgba(89,157,255,.22);--text:#f6f9ff;--muted:#91a8d3;--blue:#1680ff;--blue2:#5a57ff;--purple:#7657ff;--green:#22c55e;--red:#ff4e61;--shadow:0 24px 70px rgba(0,0,0,.32)}}
+*{{box-sizing:border-box}} html,body{{margin:0;min-height:100%;font-family:'Vazirmatn',Tahoma,sans-serif;color:var(--text)}}
+body{{background:radial-gradient(800px 420px at 8% 0%,rgba(21,105,255,.26),transparent 62%),radial-gradient(700px 400px at 96% 5%,rgba(255,54,87,.20),transparent 62%),linear-gradient(180deg,#050b1d,#07142c 55%,#061124);padding:18px 12px 35px;overflow-x:hidden}}
+body:before{{content:"";position:fixed;inset:auto 0 0;z-index:-1;height:280px;background:radial-gradient(ellipse at 50% 100%,rgba(46,96,255,.18),transparent 68%)}}
+.page{{max-width:900px;margin:auto}}
+.topbar,.hero,.traffic,.details,.link-card,.server-card{{background:linear-gradient(145deg,rgba(10,30,62,.94),rgba(5,17,39,.88));border:1px solid var(--line);box-shadow:var(--shadow);backdrop-filter:blur(18px)}}
+.topbar{{min-height:82px;border-radius:25px;padding:15px 19px;display:flex;align-items:center;justify-content:space-between;gap:15px}}
+.brand{{display:flex;align-items:center;gap:12px}} .brand-logo{{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(135deg,#1680ff,#6558ff);font-weight:900;font-size:23px;box-shadow:0 10px 28px rgba(22,128,255,.27)}}
+.brand-name{{font-size:22px;font-weight:900}} .brand-sub{{color:var(--muted);font-size:11px;margin-top:2px}} .theme-btn{{border:1px solid var(--line);background:#0c2142;color:#fff;border-radius:14px;padding:11px 13px;cursor:pointer;font-size:18px}}
+.hero{{margin-top:15px;border-radius:28px;padding:22px;overflow:hidden;position:relative}} .hero:after{{content:"";position:absolute;inset:-90px auto auto -70px;width:240px;height:240px;background:radial-gradient(circle,rgba(30,130,255,.20),transparent 68%);pointer-events:none}}
+.hero-row{{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;position:relative;z-index:1}} .title{{font-size:29px;font-weight:900}} .meta{{color:var(--muted);font-size:12px;margin-top:5px;direction:ltr;text-align:right;line-height:1.8}} .shield{{width:55px;height:55px;border-radius:18px;background:rgba(28,125,255,.10);border:1px solid rgba(75,155,255,.25);display:grid;place-items:center;font-size:28px;color:#60a5fa}}
+.hero-actions{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:21px}} .pill{{min-height:48px;padding:0 20px;border-radius:16px;display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:900;border:1px solid transparent;cursor:pointer;text-decoration:none;font-family:inherit}} .share{{color:#fff;background:linear-gradient(100deg,#147cff,#6957ff,#ff4960);box-shadow:0 12px 30px rgba(41,101,255,.24)}} .status{{background:{status_color};color:#fff}} .qr{{background:#101f3b;color:#fff;border-color:var(--line)}}
+.section{{margin-top:15px}} .section-head{{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px}} .section-title{{font-size:22px;font-weight:900}} .section-caption{{font-size:10px;color:#6f8dbf;letter-spacing:1.8px;margin-top:2px}} .section-icon{{font-size:26px;color:#ff4e61}}
+.traffic{{border-radius:28px;padding:20px}} .usage-grid{{display:grid;grid-template-columns:280px 1fr;gap:24px;align-items:center}} .ring-wrap{{position:relative;width:245px;height:245px;margin:auto}} .ring{{width:245px;height:245px;transform:rotate(-90deg)}} .track{{stroke:#17365f}} .fill{{stroke:#22c55e;filter:drop-shadow(0 0 7px rgba(34,197,94,.22))}} .ring-center{{position:absolute;inset:0;display:grid;place-items:center;text-align:center}} .percent{{font-size:42px;font-weight:900}} .percent-label{{color:var(--muted);font-size:14px;margin-top:5px}} .total{{text-align:center;color:#9eb1d4;font-size:17px;font-weight:800;margin-top:-10px;direction:ltr}}
+.stats{{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}} .stat{{background:rgba(11,31,63,.82);border:1px solid rgba(83,145,235,.17);border-radius:17px;padding:15px}} .stat-label{{font-size:12px;color:var(--muted)}} .stat-value{{font-size:18px;font-weight:900;margin-top:5px}} .stat-value.green{{color:#31e47d}} .progress{{height:14px;border-radius:999px;background:#10294e;overflow:hidden;margin-top:18px;border:1px solid rgba(89,157,255,.13)}} .progress-fill{{height:100%;width:{usage_percent}%;background:linear-gradient(90deg,#20d67a,#16a8ff,#665cff);border-radius:inherit}}
+.server-card{{border-radius:23px;padding:17px}} .server{{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#0a1c39;border:1px solid rgba(89,157,255,.14);border-radius:16px;padding:13px 15px}} .server-main{{display:flex;align-items:center;gap:11px}} .server-dot{{width:11px;height:11px;border-radius:50%;background:#22c55e;box-shadow:0 0 12px rgba(34,197,94,.65)}} .server-name{{font-weight:900}} .server-host{{font-size:11px;color:var(--muted);direction:ltr;margin-top:2px}} .online{{font-size:11px;color:#22c55e;font-weight:900}}
+.link-card{{border-radius:25px;padding:18px}} .link-head{{display:flex;align-items:center;justify-content:space-between;gap:12px}} .link-title{{font-size:19px;font-weight:900}} .copy{{border:0;border-radius:12px;background:linear-gradient(100deg,#147cff,#5b58ff);color:#fff;padding:11px 15px;font:800 13px 'Vazirmatn';cursor:pointer}} .url{{margin-top:12px;background:#07172f;border:1px solid rgba(89,157,255,.14);border-radius:15px;padding:13px;color:#89a6d5;font:11px ui-monospace,monospace;direction:ltr;text-align:left;word-break:break-all;line-height:1.8}} .actions{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:11px}} .action{{min-height:49px;border:1px solid var(--line);border-radius:14px;background:#0d2245;color:#fff;text-decoration:none;font:800 14px 'Vazirmatn';display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer}} .action.primary{{background:linear-gradient(100deg,#147cff,#6257ff);border:0}}
+.details{{border-radius:25px;padding:18px}} .details-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:13px}} .detail{{background:#0a1d3b;border:1px solid rgba(89,157,255,.13);border-radius:15px;padding:13px}} .detail-label{{font-size:10px;color:var(--muted)}} .detail-value{{font-size:13px;font-weight:900;margin-top:4px;direction:ltr;text-align:right;word-break:break-word}}
+.protocols{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}} .proto{{border-radius:12px;padding:9px 13px;background:#0d2245;border:1px solid var(--line);font-size:12px;font-weight:900}} .proto.v{{color:#b18cff}} .proto.vm{{color:#38a8ff}} .proto.t{{color:#ff5871}} .proto.s{{color:#41df9a}}
+.footer{{text-align:center;color:#637da9;font-size:11px;padding:19px 0 2px}} .modal{{position:fixed;inset:0;z-index:50;background:rgba(1,6,18,.78);display:none;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(9px)}} .modal.show{{display:flex}} .modal-card{{width:min(410px,100%);background:#f7f9ff;color:#101b55;border-radius:24px;padding:20px;text-align:center;box-shadow:0 25px 80px rgba(0,0,0,.4)}} .qrbox{{margin:15px auto;background:#fff;padding:12px;border-radius:16px;display:inline-block}} .close{{border:0;background:#e9eef8;color:#15244d;border-radius:11px;padding:10px 17px;font-family:inherit;font-weight:800;cursor:pointer}}
+@media(max-width:720px){{.usage-grid{{grid-template-columns:1fr}}.details-grid{{grid-template-columns:repeat(2,1fr)}}.topbar{{border-radius:21px}}.title{{font-size:24px}}.traffic,.hero,.details,.link-card,.server-card{{border-radius:22px}}}}
+@media(max-width:430px){{body{{padding:9px 8px 25px}}.stats{{grid-template-columns:1fr 1fr}}.details-grid{{grid-template-columns:1fr 1fr}}.ring-wrap,.ring{{width:205px;height:205px}}.percent{{font-size:35px}}.actions{{grid-template-columns:1fr}}.hero-actions{{align-items:stretch}}.pill{{width:100%}}}}
 </style>
 </head>
 <body>
 <div class="page">
+  <header class="topbar">
+    <div class="brand"><div class="brand-logo">A</div><div><div class="brand-name">AHB</div><div class="brand-sub">Subscription Panel</div></div></div>
+    <button class="theme-btn" onclick="document.documentElement.classList.toggle('light');this.textContent=document.documentElement.classList.contains('light')?'☀️':'🌙'">🌙</button>
+  </header>
 
-  <div class="theme-box">
-    <div class="theme-left">
-      <div class="theme-icon">🎨</div>
-      <div>
-        <div class="theme-title">تم</div>
-        <div class="theme-desc">با فعال کردن این گزینه، تم برنامه به حالت تیره تغییر می‌کند.</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <label class="switch" aria-label="تغییر تم"><input id="themeToggle" type="checkbox"><span class="slider"></span></label>
-      <span class="theme-moon">☾</span>
-    </div>
-  </div>
+  <section class="hero section">
+    <div class="hero-row"><div><div class="title">{label}</div><div class="meta">AHBPanel · {app_version}<br>UUID: {uid_e}</div></div><div class="shield">⌁</div></div>
+    <div class="hero-actions"><a class="pill share" href="javascript:void(0)" onclick="shareLink()">🔗 لینک اشتراک</a><div class="pill status">✓ {status_text}</div><button class="pill qr" onclick="openQr()">▦ QR Code</button></div>
+  </section>
 
-  <section class="hero">
-    <div class="hero-top">
-      <div>
-        <div class="hero-title">لینک پشتی فرض</div>
-        <div class="hero-meta">AHBPanel &nbsp;·&nbsp; {app_version_str}<br>UUID: {uid_escaped}</div>
-      </div>
-      <div class="shield">♢</div>
-    </div>
-    <div class="hero-bottom">
-      <a class="pill share" href="javascript:void(0)" onclick="shareLink()">🔗 لینک اشتراک</a>
-      <div class="hero-actions">
-        <div class="pill status" style="background:{status_color}">✓&nbsp; {status_text}</div>
-        <button class="pill qr" onclick="openQr()">QR Code &nbsp; ▦</button>
-      </div>
+  <section class="traffic section">
+    <div class="section-head"><div><div class="section-title">مصرف سرویس</div><div class="section-caption">TRAFFIC OVERVIEW</div></div><div class="section-icon">⌁</div></div>
+    <div class="usage-grid">
+      <div><div class="ring-wrap"><svg class="ring" viewBox="0 0 132 132"><circle cx="66" cy="66" r="54" fill="none" class="track" stroke-width="10"/><circle cx="66" cy="66" r="54" fill="none" class="fill" stroke-width="10" stroke-linecap="round" stroke-dasharray="339.292" stroke-dashoffset="{dash_offset}"/></svg><div class="ring-center"><div><div class="percent">{usage_percent}%</div><div class="percent-label">مصرف شده</div></div></div></div><div class="total">{used_s} / {limit_s}</div></div>
+      <div><div class="stats"><div class="stat"><div class="stat-label">حجم باقی‌مانده</div><div class="stat-value green">{remain_s}</div></div><div class="stat"><div class="stat-label">زمان باقی‌مانده</div><div class="stat-value">{expiry_rem_s}</div></div><div class="stat"><div class="stat-label">تاریخ انقضا</div><div class="stat-value">{expiry_display_s}</div></div><div class="stat"><div class="stat-label">وضعیت</div><div class="stat-value" style="color:{status_color}">{status_text}</div></div></div><div class="progress"><div class="progress-fill"></div></div></div>
     </div>
   </section>
 
-  <section class="traffic">
-    <div class="section-head">
-      <div>
-        <h2>مصرف سرویس</h2>
-        <div class="section-sub">TRAFFIC OVERVIEW</div>
-      </div>
-      <div class="chart-icon">⌁</div>
-    </div>
-
-    <div class="usage-main">
-      <div class="ring-wrap">
-        <svg class="ring" viewBox="0 0 132 132" aria-label="درصد مصرف">
-          <circle cx="66" cy="66" r="54" fill="none" class="ring-track" stroke-width="10"/>
-          <circle cx="66" cy="66" r="54" fill="none" class="ring-fill" stroke-width="10" stroke-linecap="round" stroke-dasharray="339.29" stroke-dashoffset="{dash_calc_offset}"/>
-        </svg>
-        <div class="ring-center">
-          <div>
-            <div class="ring-number">{usage_percent}%</div>
-            <div class="ring-label">مصرف شده</div>
-          </div>
-        </div>
-      </div>
-      <div class="usage-total">{used_bytes_str} / {limit_bytes_str}</div>
-    </div>
-
-    <div class="trend">
-      <div class="trend-title">روند مصرف ↗</div>
-      <div class="progress"><div class="progress-fill"></div></div>
-    </div>
-
-    <div class="bottom-stats">
-      <div class="bottom-stat">◷ &nbsp;باقی‌مانده: <b>{remaining_value_escaped}</b></div>
-      <div class="bottom-stat">▣ &nbsp;زمان: <b>{expiry_remaining_escaped}</b></div>
-    </div>
+  <section class="server-card section">
+    <div class="section-head"><div><div class="section-title">سرور</div><div class="section-caption">SERVER STATUS</div></div><div class="section-icon">◉</div></div>
+    <div class="server"><div class="server-main"><span class="server-dot"></span><div><div class="server-name">سرور اصلی</div><div class="server-host">{escape_html(host)}</div></div></div><div class="online">● {status_text}</div></div>
   </section>
 
-  <section class="link-card">
-    <div class="link-head">
-      <div class="link-title">🔗 لینک اشتراک</div>
-      <button class="copy-btn" id="copySub" onclick="copyText('{sub_url_escaped}')">▣ &nbsp; کپی</button>
-    </div>
-    <div class="url-box" id="subUrl">{sub_url_escaped}</div>
-    <div class="link-actions">
-      <button class="action-btn" onclick="openQr()">▦ &nbsp; QR Code</button>
-      <a class="action-btn download" href="{sub_url_escaped}" download>⇩ &nbsp; دانلود لینک</a>
-    </div>
+  <section class="link-card section">
+    <div class="link-head"><div class="link-title">🔗 لینک اشتراک</div><button class="copy" id="copySub" onclick="copyText({sub_url!r})">کپی لینک</button></div>
+    <div class="url">{sub_url_e}</div>
+    <div class="actions"><button class="action" onclick="openQr()">▦ QR Code</button><a class="action primary" href="{sub_url_e}" download>⇩ دانلود Subscription</a></div>
   </section>
 
-  <section class="details">
-    <div class="link-title">جزئیات سرویس</div>
-    <div class="detail-grid">
-      <div class="detail"><div class="detail-label">مصرف فعلی</div><div class="detail-value">{used_bytes_str}</div></div>
-      <div class="detail"><div class="detail-label">باقی‌مانده</div><div class="detail-value">{remaining_value_escaped}</div></div>
-      <div class="detail"><div class="detail-label">تاریخ انقضا</div><div class="detail-value">{expiry_display_escaped}</div></div>
-      <div class="detail"><div class="detail-label">IP Limit</div><div class="detail-value">{ip_limit_escaped}</div></div>
-      <div class="detail"><div class="detail-label">Connection Limit</div><div class="detail-value">{connection_limit_escaped}</div></div>
-      <div class="detail"><div class="detail-label">Speed Limit</div><div class="detail-value">{speed_limit_escaped}</div></div>
-      <div class="detail"><div class="detail-label">Protocol</div><div class="detail-value">{protocol_escaped}</div></div>
-      <div class="detail"><div class="detail-label">Fingerprint</div><div class="detail-value">{fingerprint_escaped}</div></div>
+  <section class="details section">
+    <div class="section-title">جزئیات اشتراک</div>
+    <div class="details-grid">
+      <div class="detail"><div class="detail-label">حجم کل</div><div class="detail-value">{limit_s}</div></div><div class="detail"><div class="detail-label">مصرف فعلی</div><div class="detail-value">{used_s}</div></div><div class="detail"><div class="detail-label">IP Limit</div><div class="detail-value">{escape_html(ip_limit)}</div></div><div class="detail"><div class="detail-label">Connection Limit</div><div class="detail-value">{escape_html(conn_limit)}</div></div><div class="detail"><div class="detail-label">Speed Limit</div><div class="detail-value">{escape_html(speed_limit)}</div></div><div class="detail"><div class="detail-label">Protocol</div><div class="detail-value">{protocol}</div></div><div class="detail"><div class="detail-label">Fingerprint</div><div class="detail-value">{fingerprint}</div></div><div class="detail"><div class="detail-label">شناسه</div><div class="detail-value">{uid_e}</div></div>
     </div>
+    <div class="protocols"><span class="proto v">VLESS</span><span class="proto vm">VMess</span><span class="proto t">Trojan</span><span class="proto s">Shadowsocks</span></div>
   </section>
 
-  <div class="footer">AHBPanel {app_version_str} &nbsp;·&nbsp; لینک اطلاعات سرویس</div>
+  <div class="footer">AHBPanel {app_version} · Subscription Information</div>
 </div>
 
-<div class="modal" id="qrModal" onclick="if(event.target===this)closeQr()">
-  <div class="modal-card">
-    <div class="modal-title">QR Code کانفیگ</div>
-    <div class="qrbox" id="qrBox"></div>
-    <div style="font:11px ui-monospace,monospace;color:#50639e;direction:ltr;word-break:break-all;line-height:1.7">{vless_url_escaped}</div>
-    <div style="margin-top:15px"><button class="close" onclick="closeQr()">بستن</button></div>
-  </div>
-</div>
-
+<div class="modal" id="qrModal" onclick="if(event.target===this)closeQr()"><div class="modal-card"><b>QR Code کانفیگ</b><div class="qrbox" id="qrBox"></div><div style="font:10px ui-monospace,monospace;color:#50639e;direction:ltr;word-break:break-all;line-height:1.7">{vless_url_e}</div><div style="margin-top:14px"><button class="close" onclick="closeQr()">بستن</button></div></div></div>
 <script>
-const SUB_URL = {sub_url!r};
-const VLESS_URL = {vless_url!r};
-const toggle = document.getElementById('themeToggle');
-if(localStorage.getItem('ahb_info_theme') === 'dark'){{ document.body.classList.add('dark'); toggle.checked=true; }}
-toggle.addEventListener('change',()=>{{ document.body.classList.toggle('dark',toggle.checked); localStorage.setItem('ahb_info_theme',toggle.checked?'dark':'light'); }});
-
-async function copyText(text){{
-  try{{ await navigator.clipboard.writeText(text); showCopied(); }}
-  catch(e){{
-    const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select();
-    try{{document.execCommand('copy')}}catch(_e){{}} ta.remove(); showCopied();
-  }}
-}}
-function showCopied(){{ const b=document.getElementById('copySub'); const old=b.innerHTML; b.innerHTML='✓ &nbsp; کپی شد'; setTimeout(()=>b.innerHTML=old,1500); }}
-function shareLink(){{
-  if(navigator.share) navigator.share({{title:'لینک اشتراک',text:'لینک اشتراک AHBPanel',url:SUB_URL}}).catch(()=>copyText(SUB_URL));
-  else copyText(SUB_URL);
-}}
-function openQr(){{
-  const modal=document.getElementById('qrModal'), box=document.getElementById('qrBox'); box.innerHTML='';
-  try{{ const qr=qrcode(0,'L'); qr.addData(VLESS_URL); qr.make(); box.innerHTML=qr.createImgTag(6,8); }}catch(e){{box.innerHTML='<div style="color:#101b55;padding:25px">خطا در ساخت QR</div>';}}
-  modal.classList.add('show');
-}}
+const SUB_URL={sub_url!r}, VLESS_URL={vless_url!r};
+async function copyText(t){{try{{await navigator.clipboard.writeText(t);showCopied()}}catch(e){{const a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{{document.execCommand('copy')}}catch(_){{}}a.remove();showCopied()}}}}
+function showCopied(){{const b=document.getElementById('copySub'),o=b.textContent;b.textContent='✓ کپی شد';setTimeout(()=>b.textContent=o,1400)}}
+function shareLink(){{if(navigator.share)navigator.share({{title:'لینک اشتراک AHB',text:'Subscription',url:SUB_URL}}).catch(()=>copyText(SUB_URL));else copyText(SUB_URL)}}
+function openQr(){{const m=document.getElementById('qrModal'),b=document.getElementById('qrBox');b.innerHTML='';try{{const q=qrcode(0,'L');q.addData(VLESS_URL);q.make();b.innerHTML=q.createImgTag(6,8)}}catch(e){{b.textContent='خطا در ساخت QR'}}m.classList.add('show')}}
 function closeQr(){{document.getElementById('qrModal').classList.remove('show')}}
 </script>
-</body>
-</html>"""
+</body></html>"""
 
     return HTMLResponse(info_html)
 
@@ -4804,7 +4622,7 @@ AHB Panel
 </h1>
 
 <div class="version">
-14.1.0
+14.2.0
 </div>
 
 <div class="text">
@@ -6208,7 +6026,7 @@ DASHBOARD_HTML = r"""
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>AHBPanel 14.1.0</title>
+<title>AHBPanel 14.2.0</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -6401,7 +6219,7 @@ tr:hover td{background:var(--hover)}
     <div class="sb-logo-icon">AHB</div>
     <div class="sb-logo-text">
       <div class="sb-logo-name">AHBPanel</div>
-      <div class="sb-logo-ver">v14.1.0</div>
+      <div class="sb-logo-ver">v14.2.0</div>
     </div>
   </div>
   <nav class="nav">
