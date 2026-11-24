@@ -1,5 +1,5 @@
 # ============================================================
-# ahbpanel 14.7.0
+# ahbpanel 14.8.0
 # Railway Ready
 # Created By Ahb
 # ============================================================
@@ -60,7 +60,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # ============================================================
 
 APP_NAME = "ahbpanel"
-APP_VERSION = "14.7.0"
+APP_VERSION = "14.8.0"
 
 SUPPORT_USERNAME = "@ahb_panel"
 SUPPORT_URL = "https://t.me/ahbpanel"
@@ -268,6 +268,7 @@ SUBS: dict = {}
 SESSIONS: dict = {}
 connections: dict = {}
 CATEGORIES: dict = {}
+INBOUNDS: dict = {}
 
 stats = {
     "total_bytes": 0,
@@ -752,6 +753,9 @@ def get_host(
         if host:
             host = host.split(":")[0].strip()
 
+            if _net_prefers_domain(host):
+                host = NET_STATE["domain"]
+
             CONFIG["host"] = host
 
             return host
@@ -1178,13 +1182,15 @@ def get_link_info(
         "category_number": int(cat.get("number", 0)),
         "category_name": str(cat.get("name", "عمومی")),
         "config_count": cfg_count,
+        "inbound_id": str(link.get("inbound_id") or ""),
+        "inbound_name": str((INBOUNDS.get(str(link.get("inbound_id") or "")) or {}).get("name", "")),
         "status_color": status_color,
         "connected_ips": connected_count,
         "show_vless": show_vless,
         "vless": vless_link_for_link(link, uid, host) if show_vless else "",
         "vless_full": vless_link_for_link(link, uid, host),
-        "sub": f"https://{host}/sub/{uid}",
-        "info": f"https://{host}/info/{uid}",
+        "sub": f"{sub_origin(host)}/sub/{uid}",
+        "info": f"{sub_origin(host)}/info/{uid}",
         "support": SUPPORT_USERNAME,
     }
 
@@ -1233,6 +1239,13 @@ async def load_state():
         CATEGORIES.update(
             data.get(
                 "categories",
+                {},
+            )
+        )
+
+        INBOUNDS.update(
+            data.get(
+                "inbounds",
                 {},
             )
         )
@@ -1301,6 +1314,7 @@ async def load_state():
             link.setdefault("config_count", 1)
             link.setdefault("sort_order", 0)
             link.setdefault("usage_history", [])
+            link.setdefault("inbound_id", "")
 
         logger.info(
             "State loaded: %d links / %d subscriptions",
@@ -1336,6 +1350,9 @@ async def save_state():
 
                 "categories":
                     dict(CATEGORIES),
+
+                "inbounds":
+                    dict(INBOUNDS),
 
                 "admin_accounts":
                     dict(ADMIN_ACCOUNTS),
@@ -3068,6 +3085,25 @@ async def create_link_api(
             detail="اطلاعات ارسال‌شده معتبر نیست.",
         )
 
+    # ---- اینباند: تنظیمات فنی از اینباند گرفته می‌شود ----
+    inbound_id = str(body.get("inbound_id") or "").strip()
+    if inbound_id:
+        ib = INBOUNDS.get(inbound_id)
+        if not ib:
+            raise HTTPException(status_code=404, detail="اینباند پیدا نشد")
+        if not ib.get("enabled", True):
+            raise HTTPException(status_code=400, detail="این اینباند غیرفعال است")
+        body = dict(body)
+        body["protocol"] = ib.get("protocol", DEFAULT_PROTOCOL)
+        body["port"] = ib.get("port", DEFAULT_PORT)
+        body["fingerprint"] = ib.get("fingerprint", DEFAULT_FINGERPRINT)
+        body["alpn"] = ib.get("alpn") or DEFAULT_ALPN_BY_PROTOCOL.get(body["protocol"], "http/1.1")
+        body["fragment"] = ib.get("fragment", "off")
+        if ib.get("clean_ips"):
+            body["clean_ips"] = list(ib["clean_ips"])
+        if str(ib.get("category_id") or "0") != "0":
+            body["category_id"] = str(ib["category_id"])
+
     limit_value = safe_float(
         body.get(
             "limit_value",
@@ -3265,6 +3301,10 @@ async def create_link_api(
         config_count=config_count,
     )
 
+    if inbound_id:
+        link["inbound_id"] = inbound_id
+        await save_state()
+
     host = get_host(request)
 
     result = {
@@ -3288,34 +3328,135 @@ async def create_auto_link(
     request: Request,
     _=Depends(require_auth),
 ):
+    # ساخت خودکار غیرفعال شده است؛ کانفیگ‌ها از روی اینباند ساخته می‌شوند.
+    raise HTTPException(
+        status_code=410,
+        detail="ساخت خودکار غیرفعال شده است. ابتدا یک اینباند بساز و از روی آن کانفیگ بساز.",
+    )
+
+
+# ============================================================
+# INBOUNDS
+# ============================================================
+
+INBOUND_FRAGMENTS = ("off", "safe", "balanced", "aggressive")
+
+
+def _inbound_public(iid: str, ib: dict) -> dict:
+    protocol = ib.get("protocol", DEFAULT_PROTOCOL)
+    cat = CATEGORIES.get(str(ib.get("category_id") or "0")) or {}
+    return {
+        "id": iid,
+        "name": ib.get("name", ""),
+        "protocol": protocol,
+        "protocol_label": PROTOCOL_LABELS.get(protocol, protocol),
+        "port": int(ib.get("port") or DEFAULT_PORT),
+        "fingerprint": ib.get("fingerprint", DEFAULT_FINGERPRINT),
+        "alpn": ib.get("alpn", ""),
+        "fragment": ib.get("fragment", "off"),
+        "clean_ips": list(ib.get("clean_ips") or []),
+        "category_id": str(ib.get("category_id") or "0"),
+        "category_name": str(cat.get("name", "")),
+        "enabled": bool(ib.get("enabled", True)),
+        "created_at": ib.get("created_at", ""),
+        "configs": sum(1 for l in LINKS.values() if l.get("inbound_id") == iid),
+    }
+
+
+@app.get("/api/inbounds")
+async def api_inbounds_list(_=Depends(require_perm("create"))):
+    items = sorted(INBOUNDS.items(), key=lambda kv: kv[1].get("created_at", ""))
+    return {"inbounds": [_inbound_public(i, b) for i, b in items]}
+
+
+@app.post("/api/inbounds")
+async def api_inbounds_create(request: Request, _=Depends(require_perm("create"))):
     try:
         body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("body")
     except Exception:
-        body = {}
-    if not isinstance(body, dict): body = {}
-    host = get_host(request)
-    protocol = normalize_protocol(body.get("protocol", DEFAULT_PROTOCOL))
-    profile = str(body.get("profile", "balanced")).strip().lower()
-    profiles = {
-        "normal": {"ip":0,"conn":0,"speed":0,"fp":"chrome","fragment":"off"},
-        "balanced": {"ip":2,"conn":4,"speed":0,"fp":"chrome","fragment":"safe"},
-        "gaming": {"ip":1,"conn":2,"speed":0,"fp":"chrome","fragment":"safe"},
-        "maximum": {"ip":0,"conn":0,"speed":0,"fp":"randomized","fragment":"safe"},
-    }
-    cfg = profiles.get(profile, profiles["balanced"])
-    config_count = safe_int(body.get("config_count", 1), minimum=1, maximum=40)
-    uid, link = await make_link(
-        label=auto_config_name(), limit_bytes=0, expires_at=None,
-        ip_limit=cfg["ip"], speed_limit_bytes=cfg["speed"], connection_limit=cfg["conn"],
-        note=f"Auto generated by PXPanel | profile={profile}",
-        protocol=protocol, fingerprint=cfg["fp"],
-        alpn=DEFAULT_ALPN_BY_PROTOCOL.get(protocol, ""), port=443, fragment=cfg["fragment"],
-        config_count=config_count,
+        raise HTTPException(status_code=400, detail="اطلاعات ارسال‌شده معتبر نیست.")
+
+    protocol = normalize_protocol(body.get("protocol"))
+    name = str(body.get("name") or "").strip()[:40] or ("inbound-" + secrets.token_hex(2))
+    port = safe_int(
+        body.get("port", DEFAULT_PORT),
+        default=DEFAULT_PORT, minimum=MIN_PORT, maximum=MAX_PORT,
     )
-    link["security_profile"] = profile
-    result = {**get_link_info(link, uid, host), "ok": True, "profile": profile}
-    log_activity("link", f"کانفیگ خودکار «{link['label']}» با {PROTOCOL_LABELS.get(protocol, protocol)} ساخته شد", "ok")
-    return result
+    fingerprint = str(body.get("fingerprint") or DEFAULT_FINGERPRINT).strip().lower()
+    if fingerprint not in FINGERPRINTS:
+        fingerprint = DEFAULT_FINGERPRINT
+    alpn = str(
+        body.get("alpn") or DEFAULT_ALPN_BY_PROTOCOL.get(protocol, "")
+    ).strip()[:100]
+    fragment = str(body.get("fragment") or "off").strip().lower()
+    if fragment not in INBOUND_FRAGMENTS:
+        fragment = "off"
+    raw_clean = body.get("clean_ips") or ""
+    if isinstance(raw_clean, list):
+        clean_ips = [str(x).strip() for x in raw_clean if str(x).strip()]
+    else:
+        clean_ips = [
+            x.strip() for x in str(raw_clean).replace(",", "\n").splitlines() if x.strip()
+        ]
+    category_id = str(body.get("category_id") or "0")
+    if category_id not in CATEGORIES:
+        category_id = "0"
+
+    iid = secrets.token_hex(4)
+    INBOUNDS[iid] = {
+        "name": name,
+        "protocol": protocol,
+        "port": port,
+        "fingerprint": fingerprint,
+        "alpn": alpn,
+        "fragment": fragment,
+        "clean_ips": clean_ips,
+        "category_id": category_id,
+        "enabled": True,
+        "created_at": datetime.now().isoformat(),
+    }
+    await save_state()
+    log_activity(
+        "link",
+        f"اینباند «{name}» با {PROTOCOL_LABELS.get(protocol, protocol)} ساخته شد",
+        "ok",
+    )
+    return {"ok": True, "inbound": _inbound_public(iid, INBOUNDS[iid])}
+
+
+@app.patch("/api/inbounds/{iid}")
+async def api_inbounds_patch(iid: str, request: Request, _=Depends(require_perm("create"))):
+    ib = INBOUNDS.get(iid)
+    if not ib:
+        raise HTTPException(status_code=404, detail="اینباند پیدا نشد")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("body")
+    except Exception:
+        raise HTTPException(status_code=400, detail="اطلاعات ارسال‌شده معتبر نیست.")
+    if "enabled" in body:
+        ib["enabled"] = bool(body["enabled"])
+    if "name" in body:
+        ib["name"] = str(body["name"]).strip()[:40] or ib.get("name", "")
+    await save_state()
+    return {"ok": True, "inbound": _inbound_public(iid, ib)}
+
+
+@app.delete("/api/inbounds/{iid}")
+async def api_inbounds_delete(iid: str, _=Depends(require_perm("create"))):
+    ib = INBOUNDS.pop(iid, None)
+    if ib is None:
+        raise HTTPException(status_code=404, detail="اینباند پیدا نشد")
+    # کانفیگ‌های ساخته‌شده از این اینباند می‌مانند و فقط از آن جدا می‌شوند
+    for link in LINKS.values():
+        if link.get("inbound_id") == iid:
+            link["inbound_id"] = ""
+    await save_state()
+    log_activity("link", f"اینباند «{ib.get('name', '')}» حذف شد", "ok")
+    return {"ok": True}
 
 
 # ============================================================
@@ -3374,10 +3515,10 @@ async def list_links(
                     ),
 
                 "sub_url":
-                    f"https://{host}/sub/{uid}",
+                    f"{sub_origin(host)}/sub/{uid}",
 
                 "info_url":
-                    f"https://{host}/info/{uid}",
+                    f"{sub_origin(host)}/info/{uid}",
 
                 "connected_ips":
                     len(
@@ -4089,7 +4230,7 @@ async def subscription_single(
         limit,
         link.get("expires_at"),
         host,
-        f"https://{host}/info/{uuid}",
+        f"{sub_origin(host)}/info/{uuid}",
         profile_title,
     )
 
@@ -4165,7 +4306,7 @@ async def info_page(
 
     host = get_host(request)
     vless_url = vless_link_for_link(snapshot, uid, host)
-    sub_url = f"https://{host}/sub/{uid}"
+    sub_url = f"{sub_origin(host)}/sub/{uid}"
 
     used = int(snapshot.get("used_bytes", 0) or 0)
     limit = int(snapshot.get("limit_bytes", 0) or 0)
@@ -4455,13 +4596,13 @@ async def create_sub_api(
 
         "public_url":
             (
-                f"https://{host}"
+                f"{sub_origin(host)}"
                 f"/p/{sub['uuid_key']}"
             ),
 
         "sub_url":
             (
-                f"https://{host}"
+                f"{sub_origin(host)}"
                 f"/sub-group/{sub['uuid_key']}"
             ),
     }
@@ -4544,13 +4685,13 @@ async def list_subs_api(
 
                 "public_url":
                     (
-                        f"https://{host}"
+                        f"{sub_origin(host)}"
                         f"/p/{sub['uuid_key']}"
                     ),
 
                 "sub_url":
                     (
-                        f"https://{host}"
+                        f"{sub_origin(host)}"
                         f"/sub-group/{sub['uuid_key']}"
                     ),
             }
@@ -5217,13 +5358,13 @@ async def public_sub_data(
 
                 "sub_url":
                     (
-                        f"https://{host}"
+                        f"{sub_origin(host)}"
                         f"/sub/{link_id}"
                     ),
 
                 "info_url":
                     (
-                        f"https://{host}"
+                        f"{sub_origin(host)}"
                         f"/info/{link_id}"
                     ),
 
@@ -5269,7 +5410,7 @@ async def public_sub_data(
 
         "sub_url":
             (
-                f"https://{host}"
+                f"{sub_origin(host)}"
                 f"/sub-group/{uuid_key}"
             ),
 
@@ -5341,7 +5482,7 @@ async def mix_subscription(request: Request, _=Depends(require_auth)):
     await save_state()
     return {
         "ok": True,
-        "sub_url": f"https://{host}/sub-group/{sub['uuid_key']}",
+        "sub_url": f"{sub_origin(host)}/sub-group/{sub['uuid_key']}",
         "name": mix_label,
         "count": len(lines),
         "content_preview": stats,
@@ -7655,6 +7796,10 @@ html.light .toast{background:rgba(255,255,255,.88)}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       <span class="nav-label" data-i18n="nav_groups">گروه‌هـا</span>
     </button>
+    <button class="nav-item" data-page="inbounds" data-perm="create">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="10" cy="17" r="1.5"/></svg>
+      <span class="nav-label">اینباندها</span>
+    </button>
     <button class="nav-item" data-page="nodes" data-perm="nodes">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></svg>
       <span class="nav-label">نودها</span>
@@ -7662,6 +7807,10 @@ html.light .toast{background:rgba(255,255,255,.88)}
     <button class="nav-item" data-page="mtproxy" data-perm="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 4L3 11l6 2.5L11.5 20l3-5 4.5 3z"/><path d="M9 13.5L21 4"/></svg>
       <span class="nav-label">پروکسی تلگرام</span>
+    </button>
+    <button class="nav-item" data-page="network" data-perm="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      <span class="nav-label">دامنه و پورت‌ها</span>
     </button>
     <button class="nav-item" data-page="create" data-perm="create">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
@@ -7780,10 +7929,10 @@ html.light .toast{background:rgba(255,255,255,.88)}
             <input type="checkbox" id="chkAll" onchange="toggleSelectAll(this.checked);updateBulkBar()" title="انتخاب همه" style="width:16px;height:16px;margin:0;vertical-align:middle;cursor:pointer">
           </th>
           <th style="width:28px;padding:10px 4px"></th>
-          <th data-i18n="th_name">نـام</th><th data-i18n="th_proto">پروتکـل</th><th data-i18n="th_status">وضعیت</th>
+          <th data-i18n="th_name">نـام</th><th data-i18n="th_proto">پروتکـل</th><th data-i18n="th_inbound">اینباند</th><th data-i18n="th_status">وضعیت</th>
           <th data-i18n="th_usage">مصـرف</th><th data-i18n="th_ops">عملیـات</th>
         </tr></thead>
-        <tbody id="linksTable"><tr><td colspan="7" style="text-align:center;color:var(--t3);padding:32px">...</td></tr></tbody>
+        <tbody id="linksTable"><tr><td colspan="8" style="text-align:center;color:var(--t3);padding:32px">...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -7804,7 +7953,9 @@ html.light .toast{background:rgba(255,255,255,.88)}
           </button>
         </div>
       </div>
-            <div class="field"><label data-i18n="label_proto">پروتکـل</label><select id="cProto"></select></div>
+            <div class="field"><label>اینباند</label><select id="cInbound" onchange="onInboundPick()"><option value="">— بدون اینباند (دستی) —</option></select></div>
+      <div id="cInboundHint" style="display:none;font-size:12px;line-height:1.9;padding:8px 12px;border-radius:10px;margin-bottom:10px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3)"></div>
+      <div class="field"><label data-i18n="label_proto">پروتکـل</label><select id="cProto"></select></div>
       <div class="field"><label>گروه</label><select id="cGroup"></select></div>
 <div class="form-row">
         <div class="field"><label data-i18n="label_count">تعداد کانفیگ در ساب (۱–۴۰)</label><input id="cCount" type="number" value="1" min="1" max="40"></div>
@@ -7824,18 +7975,44 @@ html.light .toast{background:rgba(255,255,255,.88)}
       </button>
     </div>
     <div class="card" style="border-color:rgba(139,92,246,.35)">
-      <div class="card-title" data-i18n="auto_create">ساخت خودکـار (پیشنهــادی)</div>
-      <p style="color:var(--t2);font-size:13px;line-height:1.75;margin-bottom:14px" data-i18n="auto_desc">با یک کلیک کانفیگ بهینه ساخته می‌شود. بعد از ساخت لینک VLESS و ساب در اختیار شماست.</p>
-      <div class="field"><label data-i18n="label_proto">پروتکـل</label><select id="aProto"></select></div>
-      <div class="field"><label data-i18n="label_count">تعداد کانفیگ در سـاب (1-40)</label><input id="aCount" type="number" value="1" min="1" max="40"></div>
-      <button class="btn btn-p" style="width:100%;background:linear-gradient(135deg,#8b5cf6,#6366f1)" onclick="doAutoCreate()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2"/></svg>
-        <span data-i18n="btn_auto">ساخـت خودکــار</span>
-      </button>
+      <div class="card-title">ساخت از روی اینباند</div>
+      <p style="color:var(--t2);font-size:13px;line-height:1.75;margin-bottom:14px">ساخت خودکار غیرفعال شده است. ابتدا یک اینباند بساز (پروتکل، پورت، فینگرپرینت و ...) و بعد از لیست «اینباند» در فرم کنار، کانفیگ بساز. کانفیگ‌ها تنظیمات فنی را از اینباند می‌گیرند.</p>
+      <button class="btn btn-p" style="width:100%" onclick="goPage('inbounds')">مدیریت اینباندها</button>
     </div>
   </div>
 </section>
 
+
+<section class="page" id="page-inbounds">
+  <div class="page-head">
+    <div>
+      <div class="page-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="10" cy="17" r="1.5"/></svg><span>اینباندها</span></div>
+      <div class="page-sub">ساخت اینباند و ساخت کانفیگ از روی آن</div>
+    </div>
+  </div>
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">ساخت اینباند جدید</div>
+      <div class="field"><label>نام اینباند</label><input id="ibName" placeholder="مثلا main" autocomplete="off"></div>
+      <div class="field"><label>پروتکل</label><select id="ibProto"></select></div>
+      <div class="form-row">
+        <div class="field"><label>پورت</label><input id="ibPort" type="number" value="443" min="1" max="65535"></div>
+        <div class="field"><label>فینگرپرینت</label><select id="ibFp"><option>chrome</option><option>firefox</option><option>safari</option><option>ios</option><option>android</option><option>edge</option><option>360</option><option>qq</option><option>random</option><option>randomized</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>ALPN (اختیاری)</label><input id="ibAlpn" placeholder="خالی = پیش‌فرض پروتکل" style="direction:ltr;text-align:left"></div>
+        <div class="field"><label>فرگمنت</label><select id="ibFrag"><option value="off">off</option><option value="safe">safe</option><option value="balanced">balanced</option><option value="aggressive">aggressive</option></select></div>
+      </div>
+      <div class="field"><label>گروه</label><select id="ibGroup"><option value="0">عمومی</option></select></div>
+      <div class="field"><label>آی‌پی تمیز (اختیاری؛ هر خط یکی)</label><textarea id="ibClean" rows="3" style="direction:ltr;text-align:left;width:100%"></textarea></div>
+      <button class="btn btn-p" style="width:100%" onclick="createInbound()">ساخت اینباند</button>
+    </div>
+    <div class="card" style="padding:0">
+      <div style="padding:16px 18px;border-bottom:1px solid var(--card-b);font-weight:700">لیست اینباندها</div>
+      <div id="inboundsList" style="padding:12px;max-height:640px;overflow:auto">...</div>
+    </div>
+  </div>
+</section>
 
 <section class="page" id="page-groups">
   <div class="page-head">
@@ -7892,6 +8069,42 @@ html.light .toast{background:rgba(255,255,255,.88)}
     </div>
   </div>
 </section>
+<section class="page" id="page-network">
+  <div class="page-head">
+    <div>
+      <div class="page-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>دامنه، SSL و پورت‌ها</span></div>
+      <div class="page-sub">تغییر دامنه با SSL خودکار · پورت داشبورد و ساب · مخصوص VPS</div>
+    </div>
+  </div>
+  <div class="g2">
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-title">دامنه و SSL خودکار</div>
+        <div id="netEngine" style="font-size:12px;line-height:2;padding:10px 12px;border-radius:10px;margin-bottom:10px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);color:var(--t2)">...</div>
+        <div class="field"><label>دامنه</label><input id="netDomain" placeholder="panel.example.com" autocomplete="off" style="direction:ltr;text-align:left"></div>
+        <div class="field"><label>ایمیل برای Let's Encrypt (اختیاری)</label><input id="netEmail" placeholder="you@example.com" autocomplete="off" style="direction:ltr;text-align:left"></div>
+        <div style="font-size:11px;color:var(--t3);line-height:1.9">قبل از ذخیره، رکورد <b dir="ltr">A</b> دامنه را روی IP سرور بگذار. پورت‌های ۸۰ و ۴۴۳ باید باز باشند.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">پورت‌ها</div>
+        <div class="field"><label>پورت داشبورد</label><input id="netDash" type="number" min="1024" max="65535" value="2053" style="direction:ltr;text-align:left"></div>
+        <div class="field"><label>پورت ساب</label><input id="netSub" type="number" min="1024" max="65535" value="2096" style="direction:ltr;text-align:left"></div>
+        <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--t2);line-height:1.9;margin:6px 0 12px;cursor:pointer"><input id="netLock" type="checkbox" style="margin-top:6px"><span>داشبورد و ساب روی ۴۴۳ بسته شود (۴۴۳ فقط برای تونل). اول مطمئن شو پورت‌های بالا باز و در دسترس‌اند.</span></label>
+        <button class="btn btn-p" style="width:100%" onclick="netApply(false)">ذخیره و دریافت SSL</button>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn btn-sm" style="flex:1" onclick="netCheck()">بررسی وضعیت</button>
+          <button class="btn btn-sm btn-d" style="flex:1" onclick="netDisable()">غیرفعال‌سازی</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">آدرس‌ها و وضعیت</div>
+      <div id="netUrls" style="font-size:13px;line-height:2.2;color:var(--t2)">...</div>
+      <div id="netStatus" style="font-size:12px;line-height:2;margin-top:12px;color:var(--t3)"></div>
+    </div>
+  </div>
+</section>
+
 <section class="page" id="page-mtproxy">
   <div class="page-head">
     <div>
@@ -8201,8 +8414,8 @@ html.light .toast{background:rgba(255,255,255,.88)}
 
 <script>
 const I18N={
-fa:{sec_panel:'پنل',sec_sys:'سیستم',nav_dash:'داشبورد',nav_configs:'کانفیگ‌ها',nav_groups:'گروه‌ها',nav_create:'ساخت کانفیگ',nav_stats:'آمار',nav_logs:'لاگ فعالیت',nav_settings:'تنظیمات',nav_support:'پشتیبانی',nav_donate:'حمایت مالی',nav_news:'اخبار',nav_admins:'ادمین‌ها',refresh_news:'بروزرسانی اطلاعیه',admins_sub:'ساخت اکانت ادمین با دسترسی سفارشی',admin_create:'ساخت اکانت ادمین',admin_user:'نام کاربری',admin_pw:'رمز عبور',admin_pw2:'تکرار رمز',admin_perms:'دسترسی‌ها',admin_btn:'ساخت اکانت',admin_list:'لیست ادمین‌ها',refresh:'بروزرسانی',refresh_stats:'بروزرسانی آمار',refresh_panel:'بروزرسانی پنل',nav_telegram:'ربات تلگرام',tg_sub:'توکن ربات و آیدی عددی ادمین · فعال‌سازی خودکار و وب‌هوک',tg_config:'پیکربندی ربات',tg_token:'توکن ربات (BotFather)',tg_admin:'آیدی عددی ادمین',tg_webhook:'فعال‌سازی Webhook (پیشنهادی روی Railway)',tg_activate:'ذخیره و فعال‌سازی ربات',tg_help:'راهنما',tg_h1:'از @BotFather یک ربات بساز و توکن را کپی کن',tg_h2:'آیدی عددی خودت را از @userinfobot بگیر',tg_h3:'ذخیره کن — وب‌هوک خودکار روی دامنه Railway ست می‌شود',logout:'خروج',loading:'در حال بارگذاری...',m_conns:'اتصالات فعال',m_traffic:'ترافیک کل',m_links:'کانفیگ‌ها',m_uptime:'آپتایم سرور',quick_create:'ساخت کانفیگ',quick_create_desc:'ساخت دستی با محدودیت ترافیک، سرعت، تعداد و انقضا',auto_create:'ساخت خودکار (پیشنهادی)',auto_create_desc:'ساخت سریع با تنظیمات بهینه · لینک VLESS و ساب',configs_sub:'مدیریت لینک‌ها · VLESS و ساب',th_name:'نام',th_proto:'پروتکل',th_status:'وضعیت',th_usage:'مصرف',th_ops:'عملیات',manual_create:'ساخت دستی',label_name:'نام',label_proto:'پروتکل',label_count:'تعداد کانفیگ در ساب (۱–۴۰)',label_limit:'محدودیت حجم',label_unit:'واحد',label_days:'انقضا (روز)',label_ip:'محدودیت IP',label_speed:'سرعت (Mbps)',btn_create:'ساخت',btn_auto:'ساخت خودکار',auto_desc:'با یک کلیک کانفیگ بهینه ساخته می‌شود. بعد از ساخت لینک VLESS و ساب در اختیار شماست.',stats_sub:'ترافیک و اتصالات · فیلتر زمانی',r_day:'روز',r_week:'هفته',r_month:'ماه',r_all:'کل',panel_info:'اطلاعات کل پنل',lang_label:'زبان',change_pw:'تغییر رمز عبور',pw_cur:'رمز فعلی',pw_new:'رمز جدید',pw_cf:'تکرار رمز',btn_save:'ذخیره',github:'گیت‌هاب',telegram:'تلگرام',channel:'کانال پشتیبان',theme:'تم',theme_dark:'تم تیره',theme_light:'تم روشن',created_title:'کانفیگ ساخته شد',copy_vless:'کپی VLESS',copy_sub:'کپی ساب',sub_label:'سابسکریپشن'},
-en:{sec_panel:'PANEL',sec_sys:'SYSTEM',nav_dash:'Dashboard',nav_configs:'Configs',nav_groups:'Groups',nav_create:'Create Config',nav_stats:'Statistics',nav_logs:'Activity Log',nav_settings:'Settings',nav_support:'Support',nav_donate:'Donate',nav_news:'News',nav_admins:'Admins',refresh_news:'Refresh news',admins_sub:'Create admin accounts with custom access',admin_create:'Create admin account',admin_user:'Username',admin_pw:'Password',admin_pw2:'Confirm password',admin_perms:'Permissions',admin_btn:'Create account',admin_list:'Admin list',refresh:'Refresh',refresh_stats:'Refresh stats',refresh_panel:'Update panel',nav_telegram:'Telegram bot',tg_sub:'Bot token and numeric admin ID · auto activate and webhook',tg_config:'Bot configuration',tg_token:'Bot token (BotFather)',tg_admin:'Admin numeric ID',tg_webhook:'Enable Webhook (recommended on Railway)',tg_activate:'Save and activate bot',tg_help:'Guide',tg_h1:'Create a bot with @BotFather and copy the token',tg_h2:'Get your numeric ID from @userinfobot',tg_h3:'Save — webhook is set automatically on Railway domain',logout:'Logout',loading:'Loading...',m_conns:'Active connections',m_traffic:'Total traffic',m_links:'Configs',m_uptime:'Server uptime',quick_create:'Create Config',quick_create_desc:'Manual create with traffic, speed, count and expiry',auto_create:'Auto Create (Suggested)',auto_create_desc:'Quick optimal create · VLESS and Sub links',configs_sub:'Manage links · VLESS and Sub',th_name:'Name',th_proto:'Protocol',th_status:'Status',th_usage:'Usage',th_ops:'Actions',manual_create:'Manual create',label_name:'Name',label_proto:'Protocol',label_count:'Configs in sub (1–40)',label_limit:'Traffic limit',label_unit:'Unit',label_days:'Expiry (days)',label_ip:'IP limit',label_speed:'Speed (Mbps)',btn_create:'Create',btn_auto:'Auto create',auto_desc:'One click creates an optimal config. VLESS and Sub links will be shown.',stats_sub:'Traffic and connections · time filter',r_day:'Day',r_week:'Week',r_month:'Month',r_all:'All',panel_info:'Panel overview',lang_label:'Language',change_pw:'Change password',pw_cur:'Current password',pw_new:'New password',pw_cf:'Confirm password',btn_save:'Save',github:'GitHub',telegram:'Telegram',channel:'Support channel',theme:'Theme',theme_dark:'Dark theme',theme_light:'Light theme',created_title:'Config created',copy_vless:'Copy VLESS',copy_sub:'Copy Sub',sub_label:'Subscription'}
+fa:{sec_panel:'پنل',sec_sys:'سیستم',nav_dash:'داشبورد',nav_configs:'کانفیگ‌ها',nav_groups:'گروه‌ها',nav_create:'ساخت کانفیگ',nav_stats:'آمار',nav_logs:'لاگ فعالیت',nav_settings:'تنظیمات',nav_support:'پشتیبانی',nav_donate:'حمایت مالی',nav_news:'اخبار',nav_admins:'ادمین‌ها',refresh_news:'بروزرسانی اطلاعیه',admins_sub:'ساخت اکانت ادمین با دسترسی سفارشی',admin_create:'ساخت اکانت ادمین',admin_user:'نام کاربری',admin_pw:'رمز عبور',admin_pw2:'تکرار رمز',admin_perms:'دسترسی‌ها',admin_btn:'ساخت اکانت',admin_list:'لیست ادمین‌ها',refresh:'بروزرسانی',refresh_stats:'بروزرسانی آمار',refresh_panel:'بروزرسانی پنل',nav_telegram:'ربات تلگرام',tg_sub:'توکن ربات و آیدی عددی ادمین · فعال‌سازی خودکار و وب‌هوک',tg_config:'پیکربندی ربات',tg_token:'توکن ربات (BotFather)',tg_admin:'آیدی عددی ادمین',tg_webhook:'فعال‌سازی Webhook (پیشنهادی روی Railway)',tg_activate:'ذخیره و فعال‌سازی ربات',tg_help:'راهنما',tg_h1:'از @BotFather یک ربات بساز و توکن را کپی کن',tg_h2:'آیدی عددی خودت را از @userinfobot بگیر',tg_h3:'ذخیره کن — وب‌هوک خودکار روی دامنه Railway ست می‌شود',logout:'خروج',loading:'در حال بارگذاری...',m_conns:'اتصالات فعال',m_traffic:'ترافیک کل',m_links:'کانفیگ‌ها',m_uptime:'آپتایم سرور',quick_create:'ساخت کانفیگ',quick_create_desc:'ساخت دستی با محدودیت ترافیک، سرعت، تعداد و انقضا',auto_create:'ساخت خودکار (پیشنهادی)',auto_create_desc:'ساخت سریع با تنظیمات بهینه · لینک VLESS و ساب',configs_sub:'مدیریت لینک‌ها · VLESS و ساب',th_name:'نام',th_proto:'پروتکل',th_inbound:'اینباند',th_status:'وضعیت',th_usage:'مصرف',th_ops:'عملیات',manual_create:'ساخت دستی',label_name:'نام',label_proto:'پروتکل',label_count:'تعداد کانفیگ در ساب (۱–۴۰)',label_limit:'محدودیت حجم',label_unit:'واحد',label_days:'انقضا (روز)',label_ip:'محدودیت IP',label_speed:'سرعت (Mbps)',btn_create:'ساخت',btn_auto:'ساخت خودکار',auto_desc:'با یک کلیک کانفیگ بهینه ساخته می‌شود. بعد از ساخت لینک VLESS و ساب در اختیار شماست.',stats_sub:'ترافیک و اتصالات · فیلتر زمانی',r_day:'روز',r_week:'هفته',r_month:'ماه',r_all:'کل',panel_info:'اطلاعات کل پنل',lang_label:'زبان',change_pw:'تغییر رمز عبور',pw_cur:'رمز فعلی',pw_new:'رمز جدید',pw_cf:'تکرار رمز',btn_save:'ذخیره',github:'گیت‌هاب',telegram:'تلگرام',channel:'کانال پشتیبان',theme:'تم',theme_dark:'تم تیره',theme_light:'تم روشن',created_title:'کانفیگ ساخته شد',copy_vless:'کپی VLESS',copy_sub:'کپی ساب',sub_label:'سابسکریپشن'},
+en:{sec_panel:'PANEL',sec_sys:'SYSTEM',nav_dash:'Dashboard',nav_configs:'Configs',nav_groups:'Groups',nav_create:'Create Config',nav_stats:'Statistics',nav_logs:'Activity Log',nav_settings:'Settings',nav_support:'Support',nav_donate:'Donate',nav_news:'News',nav_admins:'Admins',refresh_news:'Refresh news',admins_sub:'Create admin accounts with custom access',admin_create:'Create admin account',admin_user:'Username',admin_pw:'Password',admin_pw2:'Confirm password',admin_perms:'Permissions',admin_btn:'Create account',admin_list:'Admin list',refresh:'Refresh',refresh_stats:'Refresh stats',refresh_panel:'Update panel',nav_telegram:'Telegram bot',tg_sub:'Bot token and numeric admin ID · auto activate and webhook',tg_config:'Bot configuration',tg_token:'Bot token (BotFather)',tg_admin:'Admin numeric ID',tg_webhook:'Enable Webhook (recommended on Railway)',tg_activate:'Save and activate bot',tg_help:'Guide',tg_h1:'Create a bot with @BotFather and copy the token',tg_h2:'Get your numeric ID from @userinfobot',tg_h3:'Save — webhook is set automatically on Railway domain',logout:'Logout',loading:'Loading...',m_conns:'Active connections',m_traffic:'Total traffic',m_links:'Configs',m_uptime:'Server uptime',quick_create:'Create Config',quick_create_desc:'Manual create with traffic, speed, count and expiry',auto_create:'Auto Create (Suggested)',auto_create_desc:'Quick optimal create · VLESS and Sub links',configs_sub:'Manage links · VLESS and Sub',th_name:'Name',th_proto:'Protocol',th_inbound:'Inbound',th_status:'Status',th_usage:'Usage',th_ops:'Actions',manual_create:'Manual create',label_name:'Name',label_proto:'Protocol',label_count:'Configs in sub (1–40)',label_limit:'Traffic limit',label_unit:'Unit',label_days:'Expiry (days)',label_ip:'IP limit',label_speed:'Speed (Mbps)',btn_create:'Create',btn_auto:'Auto create',auto_desc:'One click creates an optimal config. VLESS and Sub links will be shown.',stats_sub:'Traffic and connections · time filter',r_day:'Day',r_week:'Week',r_month:'Month',r_all:'All',panel_info:'Panel overview',lang_label:'Language',change_pw:'Change password',pw_cur:'Current password',pw_new:'New password',pw_cf:'Confirm password',btn_save:'Save',github:'GitHub',telegram:'Telegram',channel:'Support channel',theme:'Theme',theme_dark:'Dark theme',theme_light:'Light theme',created_title:'Config created',copy_vless:'Copy VLESS',copy_sub:'Copy Sub',sub_label:'Subscription'}
 };
 let lang=localStorage.getItem('ahn_lang')||'fa';
 let statRange='month';
@@ -8301,6 +8514,80 @@ async function mtpTag(id){const p=(window.__mtp&&window.__mtp.proxies||[]).find(
 async function mtpDel(id){if(!confirm('این پروکسی حذف شود؟'))return;const r=await api('/api/mtproxy/'+id,{method:'DELETE'});if(r)loadMtp()}
 setInterval(()=>{const pg=document.getElementById('page-mtproxy');if(pg&&pg.classList.contains('on')&&!document.hidden)loadMtp()},5000);
 
+let __netPoll=null;
+function netLink(u){return '<a href="'+esc(u)+'" target="_blank" rel="noopener" dir="ltr" style="color:var(--p,#60a5fa);word-break:break-all">'+esc(u)+'</a>'}
+function netRenderUrls(d){
+  const box=document.getElementById('netUrls');
+  const u=d.urls||{};
+  if(!d.settings.enabled||!u.dashboard){box.innerHTML='دامنه‌ای فعال نیست. دامنه را وارد کن و ذخیره بزن.';return}
+  box.innerHTML='داشبورد: '+netLink(u.dashboard)+'<br>ساب: <span dir="ltr">'+esc(u.sub)+'/sub/…</span><br>تونل (۴۴۳): <span dir="ltr">'+esc(u.main)+'</span>';
+}
+async function loadNet(){
+  const d=await api('/api/network');if(!d)return;
+  window.__net=d;
+  const s=d.settings;
+  const set=(id,v)=>{const e=document.getElementById(id);if(e&&document.activeElement!==e)e.value=v};
+  set('netDomain',s.domain||'');set('netEmail',s.email||'');set('netDash',s.dash_port);set('netSub',s.sub_port);
+  document.getElementById('netLock').checked=!!s.lock_443;
+  document.getElementById('netEngine').innerHTML=(d.caddy.alive?'🟢 Caddy روشن است':'🔴 Caddy در دسترس نیست — روی سرور install.sh را اجرا کن')+'<br>IP سرور: <b dir="ltr">'+esc(d.server_ip||'نامشخص')+'</b> · پورت داخلی پنل: <b dir="ltr">'+d.internal_port+'</b>';
+  netRenderUrls(d);
+}
+async function netApply(force){
+  const body={
+    domain:document.getElementById('netDomain').value,
+    email:document.getElementById('netEmail').value,
+    dash_port:document.getElementById('netDash').value,
+    sub_port:document.getElementById('netSub').value,
+    lock_443:document.getElementById('netLock').checked,
+    force:!!force
+  };
+  let r,data={};
+  try{
+    r=await fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body)});
+    data=await r.json().catch(()=>({}));
+  }catch(e){toast('ارتباط برقرار نشد');return}
+  if(r.status===401){location.href='/login';return}
+  if(r.status===409&&data.need_force){
+    if(confirm(data.detail+'\n\nبا این حال ادامه بدهم؟'))return netApply(true);
+    return;
+  }
+  if(!r.ok){toast(data.detail||'خطا');return}
+  toast('تنظیمات اعمال شد');
+  const st=document.getElementById('netStatus');
+  st.innerHTML='گواهی SSL در حال دریافت است…'+(data.firewall?'<br>'+esc(data.firewall):'')+'<br>داشبورد از این به بعد: '+netLink(data.urls.dashboard);
+  await loadNet();
+  netWatch();
+}
+function netFmt(c){
+  const row=(ok,t)=>(ok?'🟢 ':'🔴 ')+t;
+  let h=row(c.dns_ok,'DNS: '+esc((c.dns_ips||[]).join(', ')||'resolve نشد')+(c.dns_ok?'':' (باید '+esc(c.server_ip||'IP سرور')+' باشد)'))+'<br>';
+  h+=row(c.main&&c.main.ok,'SSL روی ۴۴۳')+(c.main&&c.main.error?' <span dir="ltr" style="font-size:11px">'+esc(c.main.error)+'</span>':'')+'<br>';
+  h+=row(c.dash&&c.dash.ok,'پورت داشبورد')+(c.dash&&c.dash.error?' <span dir="ltr" style="font-size:11px">'+esc(c.dash.error)+'</span>':'');
+  return h;
+}
+async function netCheck(){
+  const st=document.getElementById('netStatus');
+  st.textContent='در حال بررسی…';
+  const c=await api('/api/network/check',{method:'POST'});
+  if(!c){st.textContent='';return}
+  st.innerHTML=netFmt(c);
+  return c;
+}
+function netWatch(){
+  clearInterval(__netPoll);
+  let n=0;
+  __netPoll=setInterval(async()=>{
+    n++;
+    const c=await netCheck();
+    if((c&&c.ssl_ok)||n>=12){clearInterval(__netPoll);if(c&&c.ssl_ok)toast('SSL فعال شد ✓')}
+  },6000);
+}
+async function netDisable(){
+  if(!confirm('دامنه و SSL خودکار غیرفعال شود؟ دسترسی از طریق دامنه قطع می‌شود.'))return;
+  const r=await api('/api/network/disable',{method:'POST'});
+  if(r){toast('غیرفعال شد');loadNet()}
+}
+
 function goPage(name){
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('on',n.dataset.page===name));
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id==='page-'+name));
@@ -8308,6 +8595,7 @@ function goPage(name){
   window.scrollTo({top:0,behavior:'smooth'});
   if(name==='logs')loadLogs();
   if(name==='mtproxy')loadMtp();
+  if(name==='network')loadNet();
   if(name==='configs'||name==='dash'||name==='stats')refreshAll();
 }
 document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>goPage(el.dataset.page)));
@@ -8422,6 +8710,8 @@ function patchLinkRow(tr, l){
   if(badge){ badge.textContent=String(conn); badge.className=linkBadgeClass(l); }
   const dEl=tr.querySelector('.cfg-dates');
   if(dEl){ const t=document.createElement('div'); t.innerHTML=dateLines(l); if(t.firstChild) dEl.replaceWith(t.firstChild); }
+  const ibCell=tr.querySelector('[data-inbound]');
+  if(ibCell){ ibCell.innerHTML = l.inbound_name ? `<span style="padding:2px 7px;border-radius:8px;background:var(--hover)">${esc(l.inbound_name)}</span>` : '<span style="color:var(--t3)">—</span>'; }
   const usageCell=tr.querySelector('[data-usage]');
   if(usageCell){
     usageCell.textContent = fmtB(l.used_bytes) + (l.limit_bytes?(' / '+fmtB(l.limit_bytes)):'');
@@ -8435,7 +8725,7 @@ function patchLinkRow(tr, l){
 }
 function renderLinks(arr){
   const tb=document.getElementById('linksTable');
-  if(!arr.length){tb.innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:28px">${lang==='fa'?'کانفیگی نیست':'No configs'}</td></tr>`;updateBulkBar();return}
+  if(!arr.length){tb.innerHTML=`<tr><td colspan="8" style="text-align:center;color:var(--t3);padding:28px">${lang==='fa'?'کانفیگی نیست':'No configs'}</td></tr>`;updateBulkBar();return}
   window.__linksMap={};
   const catMap=window.__catMap||{};
   // preserve checked state
@@ -8460,6 +8750,7 @@ function renderLinks(arr){
         </div>
       </td>
       <td style="color:var(--t3);font-size:11px">${esc(proto)}${dateLines(l)}</td>
+      <td data-inbound style="font-size:11px">${l.inbound_name?`<span style="padding:2px 7px;border-radius:8px;background:var(--hover);color:var(--t2,var(--t3))">${esc(l.inbound_name)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>
       <td><label class="switch"><input type="checkbox" ${on?'checked':''} onchange="toggleLink('${esc(uid)}',this.checked)"><span class="slider"></span></label></td>
       <td data-usage>${fmtB(l.used_bytes)}${l.limit_bytes?(' / '+fmtB(l.limit_bytes)):''}</td>
       <td class="ops">
@@ -8520,20 +8811,88 @@ function showResult(data){
 function closeResult(){document.getElementById('resultModal').classList.remove('open')}
 document.getElementById('resultModal').addEventListener('click',e=>{if(e.target.id==='resultModal')closeResult()});
 
-async function doAutoCreate(){
-  toast(lang==='fa'?'در حال ساخت...':'Creating...');
-  const count=Math.max(1,Math.min(40,Number(document.getElementById('aCount')?.value)||1));
-  const protocol=document.getElementById('aProto')?.value||undefined;
-  let r=await api('/api/links/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config_count:count,protocol})});
-  if(!r){
-    r=await api('/api/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:'auto-'+Date.now().toString(36).slice(-5),limit_value:0,limit_unit:'GB',config_count:count})});
+
+async function loadInbounds(){
+  const r=await api('/api/inbounds');
+  const list=(r&&r.inbounds)||[];
+  window.__inbounds=list;
+  const sel=document.getElementById('cInbound');
+  if(sel){
+    const cur=sel.value;
+    sel.innerHTML='<option value="">— بدون اینباند (دستی) —</option>'+list.filter(i=>i.enabled).map(i=>`<option value="${esc(i.id)}">${esc(i.name)} · ${esc(i.protocol_label)} · :${i.port}</option>`).join('');
+    if(cur&&list.some(i=>i.id===cur&&i.enabled)) sel.value=cur;
+    onInboundPick();
   }
-  if(r){showResult(r);refreshAll()}
+  const g=await api('/api/categories');
+  const ibg=document.getElementById('ibGroup');
+  if(ibg&&g&&g.categories){
+    const cur=ibg.value;
+    ibg.innerHTML=g.categories.map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.id)}</option>`).join('')||'<option value="0">عمومی</option>';
+    if(cur) ibg.value=cur;
+  }
+  const box=document.getElementById('inboundsList');
+  if(!box)return;
+  if(!list.length){box.innerHTML='<div style="color:var(--t3);text-align:center;padding:20px">هنوز اینباندی نساخته‌ای</div>';return}
+  box.innerHTML=list.map(i=>`<div style="border:1px solid var(--card-b);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--bg3)">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
+      <div><b>${esc(i.name)}</b> <span style="font-size:11px;color:var(--t3)">${i.configs} کانفیگ</span></div>
+      <label class="switch" title="فعال/غیرفعال"><input type="checkbox" ${i.enabled?'checked':''} onchange="toggleInbound('${esc(i.id)}',this.checked)"><span class="slider"></span></label>
+    </div>
+    <div style="font-size:12px;color:var(--t2);margin-top:6px;direction:ltr;text-align:left">${esc(i.protocol_label)} · port ${i.port} · fp ${esc(i.fingerprint)}${i.alpn?(' · '+esc(i.alpn)):''}${i.fragment&&i.fragment!=='off'?(' · frag '+esc(i.fragment)):''}</div>
+    <div class="ops" style="margin-top:10px">
+      <button class="btn btn-p btn-sm" onclick="useInbound('${esc(i.id)}')">ساخت کانفیگ</button>
+      <button class="btn btn-sm btn-d" onclick="deleteInbound('${esc(i.id)}')">حذف</button>
+    </div>
+  </div>`).join('');
+}
+async function createInbound(){
+  const body={
+    name:document.getElementById('ibName').value.trim(),
+    protocol:document.getElementById('ibProto').value,
+    port:Number(document.getElementById('ibPort').value)||443,
+    fingerprint:document.getElementById('ibFp').value,
+    alpn:document.getElementById('ibAlpn').value.trim(),
+    fragment:document.getElementById('ibFrag').value,
+    category_id:document.getElementById('ibGroup').value||'0',
+    clean_ips:document.getElementById('ibClean').value
+  };
+  const r=await api('/api/inbounds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(r){toast('اینباند ساخته شد');document.getElementById('ibName').value='';document.getElementById('ibClean').value='';loadInbounds()}
+}
+async function toggleInbound(id,en){
+  const r=await api('/api/inbounds/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!en})});
+  if(r){toast(en?'فعال شد':'غیرفعال شد');loadInbounds()}
+}
+async function deleteInbound(id){
+  if(!confirm('اینباند حذف شود؟ (کانفیگ‌های ساخته‌شده می‌مانند)'))return;
+  const r=await api('/api/inbounds/'+id,{method:'DELETE'});
+  if(r){toast('حذف شد');loadInbounds()}
+}
+async function useInbound(id){
+  goPage('create');
+  await loadInbounds();
+  const sel=document.getElementById('cInbound');
+  if(sel){sel.value=id;onInboundPick()}
+}
+function onInboundPick(){
+  const sel=document.getElementById('cInbound');
+  const hint=document.getElementById('cInboundHint');
+  const pr=document.getElementById('cProto'),gr=document.getElementById('cGroup');
+  const ib=((window.__inbounds)||[]).find(x=>x.id===(sel&&sel.value));
+  if(pr)pr.disabled=!!ib;
+  if(gr)gr.disabled=!!ib;
+  if(!hint)return;
+  if(ib){
+    if(pr)pr.value=ib.protocol;
+    hint.style.display='block';
+    hint.textContent='تنظیمات فنی از اینباند «'+ib.name+'» گرفته می‌شود: '+ib.protocol_label+' · پورت '+ib.port;
+  }else{hint.style.display='none'}
 }
 async function doManualCreate(){
   const body={
     label:document.getElementById('cName').value||undefined,
     protocol:document.getElementById('cProto')?.value||undefined,
+    inbound_id:document.getElementById('cInbound')?.value||undefined,
     category_id:document.getElementById('cGroup')?.value||'0',
     config_count:Math.max(1,Math.min(40,Number(document.getElementById('cCount').value)||1)),
     limit_value:Number(document.getElementById('cLimit').value)||0,
@@ -8613,6 +8972,8 @@ goPage=function(name){
   if(name==='news') loadNews();
   if(name==='admins') loadAdmins();
   if(name==='groups') loadGroups();
+  if(name==='inbounds') loadInbounds();
+  if(name==='create') loadInbounds();
   if(name==='nodes') loadNodes();
   if(name==='settings') loadSecurity();
 };
@@ -8717,7 +9078,7 @@ async function loadProtocols(){
   const r=await api('/api/protocols');
   const list=(r&&r.protocols)||[];
   const def=(r&&r.default)||'vless-ws';
-  ['cProto','aProto'].forEach(id=>{
+  ['cProto','ibProto'].forEach(id=>{
     const el=document.getElementById(id);
     if(!el)return;
     el.innerHTML=list.map(p=>`<option value="${esc(p.id)}" ${p.id===def?'selected':''}>${esc(p.label||p.id)}</option>`).join('')
@@ -10132,6 +10493,410 @@ async def api_mtp_settings(request: Request, token=Depends(require_perm("setting
 
 
 # ============================================================
+# VPS NETWORK  —  دامنه / SSL خودکار / پورت داشبورد و ساب
+# ------------------------------------------------------------
+# روی VPS یک Caddy جلوی پنل می‌نشیند (install.sh نصبش می‌کند):
+#   • گواهی SSL را خودش از Let's Encrypt می‌گیرد و تمدید می‌کند
+#   • https://دامنه            -> تونل (۴۴۳)
+#   • https://دامنه:پورت-داشبورد -> کل پنل
+#   • https://دامنه:پورت-ساب     -> فقط مسیرهای ساب
+# پنل تنظیمات Caddy را از طریق Admin API (127.0.0.1:2019) عوض می‌کند.
+# ============================================================
+
+import re as _re_net
+import shutil as _shutil_net
+import socket as _socket_net
+
+NET_FILE = DATA_DIR / "network_settings.json"
+CADDY_ADMIN = os.environ.get("CADDY_ADMIN", "http://127.0.0.1:2019").rstrip("/")
+
+NET_DEFAULTS = {
+    "enabled": False,
+    "domain": "",
+    "email": "",
+    "dash_port": 2053,
+    "sub_port": 2096,
+    "lock_443": False,
+}
+NET_STATE: dict = dict(NET_DEFAULTS)
+_NET_IP_CACHE = {"ip": "", "ts": 0.0}
+
+_NET_DOMAIN_RE = _re_net.compile(
+    r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+_NET_EMAIL_RE = _re_net.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+_NET_IPV4_RE = _re_net.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+# مسیرهایی که روی پورت ساب باز می‌مانند
+_NET_SUB_PATHS = "/sub/* /sub-group/* /sub-all /info/* /p/* /api/public/* /ahb-logo.png"
+# مسیرهایی که اگر «قفل ۴۴۳» روشن باشد روی ۴۴۳ بسته می‌شوند
+# (تونل، وب‌هوک تلگرام، /health و نودها باز می‌مانند)
+_NET_PANEL_PATHS = (
+    "/ /dashboard /dashboard/* /login /api/* /stats /stats/* "
+    "/sub/* /sub-group/* /sub-all /info/* /p/* /test-ws"
+)
+
+
+def _net_load():
+    try:
+        if NET_FILE.exists():
+            data = json.loads(NET_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for k in NET_DEFAULTS:
+                    if k in data:
+                        NET_STATE[k] = data[k]
+    except Exception as exc:
+        logger.warning("network settings load failed: %s", exc)
+
+
+def _net_save():
+    try:
+        NET_FILE.write_text(
+            json.dumps(NET_STATE, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.warning("network settings save failed: %s", exc)
+
+
+_net_load()
+
+
+def sub_origin(host: str) -> str:
+    """https://host  یا  https://host:پورت-ساب  (وقتی دامنه‌ی تنظیم‌شده فعال است)."""
+    n = NET_STATE
+    if n.get("enabled") and n.get("domain") and str(host or "").lower() == n["domain"]:
+        sp = int(n.get("sub_port") or 0)
+        if sp and sp != 443:
+            return f"https://{host}:{sp}"
+    return f"https://{host}"
+
+
+def _net_prefers_domain(host: str) -> bool:
+    """اگر پنل با IP یا localhost باز شده، لینک‌ها با دامنه‌ی تنظیم‌شده ساخته شوند."""
+    if not (NET_STATE.get("enabled") and NET_STATE.get("domain")):
+        return False
+    h = str(host or "").lower()
+    return h in ("", "localhost", "127.0.0.1") or bool(_NET_IPV4_RE.match(h))
+
+
+def _net_urls() -> dict:
+    n = NET_STATE
+    if not (n.get("enabled") and n.get("domain")):
+        return {}
+    d = n["domain"]
+    return {
+        "main": f"https://{d}",
+        "dashboard": f"https://{d}:{n['dash_port']}/dashboard",
+        "sub": f"https://{d}:{n['sub_port']}",
+    }
+
+
+def _net_caddyfile(n: dict) -> str:
+    d = n["domain"]
+    up = f"127.0.0.1:{PORT}"
+    rp = "reverse_proxy " + up + " {\n\t\tflush_interval -1\n\t}"
+    out = []
+    if n.get("email"):
+        out.append("{\n\temail " + n["email"] + "\n}\n")
+
+    # --- ۴۴۳: تونل (+ کل پنل، مگر قفل روشن باشد) ---
+    if n.get("lock_443"):
+        out.append(
+            f"{d} {{\n"
+            "\t@panel {\n"
+            f"\t\tpath {_NET_PANEL_PATHS}\n"
+            "\t\tnot path /api/node/*\n"
+            "\t}\n"
+            "\thandle @panel {\n"
+            "\t\trespond \"Not Found\" 404\n"
+            "\t}\n"
+            "\thandle {\n"
+            f"\t\t{rp}\n"
+            "\t}\n"
+            "}\n"
+        )
+    else:
+        out.append(f"{d} {{\n\t{rp}\n}}\n")
+
+    # --- پورت داشبورد: کل پنل ---
+    out.append(f"{d}:{int(n['dash_port'])} {{\n\t{rp}\n}}\n")
+
+    # --- پورت ساب: فقط مسیرهای ساب ---
+    out.append(
+        f"{d}:{int(n['sub_port'])} {{\n"
+        f"\t@sub path {_NET_SUB_PATHS}\n"
+        "\thandle @sub {\n"
+        f"\t\t{rp}\n"
+        "\t}\n"
+        "\thandle {\n"
+        "\t\trespond \"Not Found\" 404\n"
+        "\t}\n"
+        "}\n"
+    )
+    return "\n".join(out)
+
+
+async def _caddy_alive() -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{CADDY_ADMIN}/config/")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _caddy_load(caddyfile: str):
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(
+                f"{CADDY_ADMIN}/load",
+                content=caddyfile.encode("utf-8"),
+                headers={"Content-Type": "text/caddyfile"},
+            )
+    except Exception as exc:
+        return False, f"به Caddy وصل نشد ({CADDY_ADMIN}): {exc}"
+    if r.status_code == 200:
+        try:
+            (DATA_DIR / "Caddyfile.generated").write_text(caddyfile, encoding="utf-8")
+        except Exception:
+            pass
+        return True, ""
+    return False, (r.text or f"HTTP {r.status_code}").strip()[:600]
+
+
+async def _net_server_ip(force: bool = False) -> str:
+    if (
+        not force
+        and _NET_IP_CACHE["ip"]
+        and time.time() - _NET_IP_CACHE["ts"] < 600
+    ):
+        return _NET_IP_CACHE["ip"]
+    for url in (
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://ifconfig.me/ip",
+    ):
+        try:
+            async with httpx.AsyncClient(timeout=4) as c:
+                r = await c.get(url)
+            ip = r.text.strip()
+            if _NET_IPV4_RE.match(ip):
+                _NET_IP_CACHE.update(ip=ip, ts=time.time())
+                return ip
+        except Exception:
+            continue
+    return _NET_IP_CACHE["ip"]
+
+
+async def _net_resolve(domain: str) -> list:
+    try:
+        infos = await asyncio.to_thread(
+            _socket_net.getaddrinfo, domain, None, _socket_net.AF_INET
+        )
+        return sorted({i[4][0] for i in infos})
+    except Exception:
+        return []
+
+
+async def _net_firewall(ports) -> str:
+    """اگر پنل با دسترسی root اجرا شده و ufw فعال است، پورت‌ها را باز می‌کند."""
+    try:
+        if os.name != "posix" or os.geteuid() != 0:
+            return "پورت‌ها را خودت در فایروال باز کن (پنل root نیست)"
+        ufw = _shutil_net.which("ufw")
+        if not ufw:
+            return "ufw نصب نیست؛ اگر فایروال داری پورت‌ها را باز کن"
+        proc = await asyncio.create_subprocess_exec(
+            ufw, "status",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        if b"inactive" in out.lower():
+            return "ufw غیرفعال است؛ نیازی به باز کردن پورت نیست"
+        for p in ports:
+            pr = await asyncio.create_subprocess_exec(
+                ufw, "allow", f"{int(p)}/tcp",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await pr.communicate()
+        return "پورت‌ها در ufw باز شد: " + ", ".join(str(p) for p in ports)
+    except Exception as exc:
+        return f"باز کردن فایروال انجام نشد: {exc}"
+
+
+def _net_owner_only(token):
+    if get_session_meta(token).get("role") != "owner":
+        raise HTTPException(status_code=403, detail="فقط مالک پنل به این بخش دسترسی دارد")
+
+
+def _net_clean(body: dict) -> dict:
+    domain = str(body.get("domain") or "").strip().lower()
+    domain = _re_net.sub(r"^[a-z]+://", "", domain).split("/")[0].split(":")[0].strip(".")
+    if not _NET_DOMAIN_RE.match(domain) or _NET_IPV4_RE.match(domain):
+        raise HTTPException(
+            status_code=400,
+            detail="دامنه نامعتبر است (مثلاً panel.example.com — بدون http و بدون پورت)",
+        )
+    email = str(body.get("email") or "").strip()
+    if email and not _NET_EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="ایمیل نامعتبر است")
+    try:
+        dash = int(body.get("dash_port"))
+        sub = int(body.get("sub_port"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="پورت‌ها باید عدد باشند")
+    reserved = {80, 443, 2019, PORT, MTP_PORT}
+    for label, p in (("داشبورد", dash), ("ساب", sub)):
+        if p < 1024 or p > 65535:
+            raise HTTPException(status_code=400, detail=f"پورت {label} باید بین ۱۰۲۴ و ۶۵۵۳۵ باشد")
+        if p in reserved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"پورت {p} رزرو است (80، 443، 2019، پورت داخلی پنل {PORT} و پروکسی تلگرام {MTP_PORT})",
+            )
+    if dash == sub:
+        raise HTTPException(status_code=400, detail="پورت داشبورد و ساب نباید یکی باشد")
+    return {
+        "enabled": True,
+        "domain": domain,
+        "email": email,
+        "dash_port": dash,
+        "sub_port": sub,
+        "lock_443": bool(body.get("lock_443")),
+    }
+
+
+@app.get("/api/network")
+async def api_net_get(token=Depends(require_auth)):
+    _net_owner_only(token)
+    return {
+        "settings": NET_STATE,
+        "caddy": {"alive": await _caddy_alive(), "admin": CADDY_ADMIN},
+        "server_ip": await _net_server_ip(),
+        "internal_port": PORT,
+        "mtproxy_port": MTP_PORT,
+        "urls": _net_urls(),
+    }
+
+
+@app.post("/api/network")
+async def api_net_apply(request: Request, token=Depends(require_auth)):
+    _net_owner_only(token)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json")
+    new = _net_clean(body)
+
+    if not await _caddy_alive():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Caddy روشن نیست یا نصب نشده. روی سرور install.sh را اجرا کن "
+                "(یا systemctl start caddy)."
+            ),
+        )
+
+    # پیش‌بررسی DNS: بدون رکورد A درست، گواهی صادر نمی‌شود
+    if not body.get("force"):
+        ips = await _net_resolve(new["domain"])
+        my_ip = await _net_server_ip(True)
+        if not ips:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "need_force": True,
+                    "detail": (
+                        f"دامنه هنوز resolve نمی‌شود. یک رکورد A برای {new['domain']} "
+                        f"روی IP سرور ({my_ip or '؟'}) بساز و چند دقیقه صبر کن."
+                    ),
+                },
+            )
+        if my_ip and my_ip not in ips:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "need_force": True,
+                    "detail": (
+                        f"دامنه روی {', '.join(ips)} اشاره می‌کند ولی IP این سرور {my_ip} است. "
+                        "اگر از کلودفلر (ابر نارنجی) استفاده می‌کنی این هشدار عادی است."
+                    ),
+                },
+            )
+
+    ok, err = await _caddy_load(_net_caddyfile(new))
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Caddy تنظیمات را نپذیرفت: {err}")
+
+    NET_STATE.update(new)
+    _net_save()
+    CONFIG["host"] = new["domain"]
+    fw = await _net_firewall([80, 443, new["dash_port"], new["sub_port"]])
+    log_activity(
+        "system",
+        f"دامنه/پورت‌ها تغییر کرد: {new['domain']} · داشبورد {new['dash_port']} · ساب {new['sub_port']}",
+        "ok",
+    )
+    return {"ok": True, "urls": _net_urls(), "firewall": fw}
+
+
+@app.post("/api/network/disable")
+async def api_net_disable(token=Depends(require_auth)):
+    _net_owner_only(token)
+    ok, err = await _caddy_load("# ahbpanel: reverse proxy disabled\n")
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    NET_STATE["enabled"] = False
+    _net_save()
+    log_activity("system", "دامنه و SSL خودکار غیرفعال شد", "ok")
+    return {"ok": True}
+
+
+@app.post("/api/network/check")
+async def api_net_check(token=Depends(require_auth)):
+    _net_owner_only(token)
+    d = NET_STATE.get("domain") or ""
+    if not (NET_STATE.get("enabled") and d):
+        raise HTTPException(status_code=400, detail="دامنه‌ای تنظیم نشده")
+    ips = await _net_resolve(d)
+    my_ip = await _net_server_ip(True)
+    res = {
+        "domain": d,
+        "server_ip": my_ip,
+        "dns_ips": ips,
+        "dns_ok": bool(my_ip and my_ip in ips),
+        "caddy": await _caddy_alive(),
+    }
+    for key, port in (("main", 443), ("dash", int(NET_STATE["dash_port"]))):
+        url = f"https://{d}/health" if port == 443 else f"https://{d}:{port}/health"
+        try:
+            async with httpx.AsyncClient(timeout=8, verify=True) as c:
+                r = await c.get(url)
+            res[key] = {"ok": r.status_code == 200, "status": r.status_code}
+        except Exception as exc:
+            res[key] = {"ok": False, "error": str(exc)[:160]}
+    res["ssl_ok"] = bool(res["main"].get("ok"))
+    return res
+
+
+@app.on_event("startup")
+async def _net_startup():
+    if not (NET_STATE.get("enabled") and NET_STATE.get("domain")):
+        return
+
+    async def _reapply():
+        for _ in range(6):
+            if await _caddy_alive():
+                ok, err = await _caddy_load(_net_caddyfile(NET_STATE))
+                logger.info("Caddy config re-applied: %s %s", ok, err)
+                return
+            await asyncio.sleep(5)
+        logger.warning("Caddy admin API not reachable at %s", CADDY_ADMIN)
+
+    asyncio.create_task(_reapply())
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -10139,7 +10904,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host=os.environ.get("PANEL_HOST", "0.0.0.0"),
         port=PORT,
         log_level="info",
         workers=1,
